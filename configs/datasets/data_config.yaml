@@ -1,128 +1,53 @@
 # Dataset paths configuration for MicroVLM-E
-    sample_ratio: 100
-    ann_file: llava_instruct_150k.json
-    images: data/coco
-    enabled: false
-    path: data/llava
-    type: instruction
-    name: LLaVA Instruction Tuning
-  llava_instruct:
-  # Instruction tuning
-
-    sample_ratio: 40
-    images: data/coco
-    enabled: false
-    path: data/refcocog
-    type: rec
-    name: RefCOCOg
-  refcocog:
-
-    sample_ratio: 40
-    images: data/coco
-    enabled: false
-    path: data/refcoco_plus
-    type: rec
-    name: RefCOCO+
-  refcoco_plus:
-
-    sample_ratio: 40
-    images: data/coco
-    enabled: false
-    path: data/refcoco
-    type: rec
-    name: RefCOCO
-  refcoco:
-  # Referring Expression Comprehension
-
-    sample_ratio: 10
-    enabled: false
-    path: data/ocrvqa
-    type: vqa
-    name: OCR-VQA
-  ocrvqa:
-
-    sample_ratio: 30
-    enabled: false
-    path: data/gqa
-    type: vqa
-    name: GQA
-  gqa:
-
-    sample_ratio: 20
-    images: data/coco
-    enabled: false
-    path: data/aokvqa
-    type: vqa
-    name: A-OKVQA
-  aokvqa:
-
-    sample_ratio: 20
-    images: data/coco
-    enabled: false
-    path: data/okvqa
-    type: vqa
-    name: OK-VQA
-  okvqa:
-
-    sample_ratio: 50
-    images: data/coco
-    enabled: false
-    path: data/vqa
-    type: vqa
-    name: VQA v2
-  vqav2:
-  # VQA datasets
-
-    sample_ratio: 20
-    enabled: false
-    path: data/flickr30k
-    type: captioning
-    name: Flickr30k
-  flickr30k:
-
-    sample_ratio: 30
-    val_images: val2017
-    train_images: train2017
-    val_ann: annotations/captions_val2017.json
-    train_ann: annotations/captions_train2017.json
-    enabled: false
-    path: data/coco
-    type: captioning
-    name: COCO 2017
-  coco:
-  # Captioning datasets
-
-    sample_ratio: 14
-    enabled: false
-    path: data/cc_sbu
-    type: image_text
-    name: CC3M + SBU Combined
-  cc_sbu:
-
-    sample_ratio: 14
-    enabled: false
-    path: data/sbu
-    type: image_text
-    name: SBU Captions
-  sbu:
-
-    sample_ratio: 50
-    enabled: false
-    path: data/cc3m
-    type: image_text
-    name: Conceptual Captions 3M
-  cc3m:
-
-    sample_ratio: 115
-    enabled: false
-    path: data/laion
-    type: image_text
-    name: LAION-400M Subset
-  laion:
-  # Pretraining datasets
-datasets:
 
 data_root: data
 
-# Edit these paths to match your local setup
+datasets:
+  laion:
+    name: LAION-400M Subset
+    type: image_text
+    path: data/laion
+    enabled: false
+    sample_ratio: 115
 
+  cc3m:
+    name: Conceptual Captions 3M
+    type: image_text
+    path: data/cc3m
+    enabled: false
+    sample_ratio: 50
+
+  sbu:
+    name: SBU Captions
+    type: image_text
+    path: data/sbu
+    enabled: false
+    sample_ratio: 14
+
+  coco:
+    name: COCO 2017
+    type: captioning
+    path: data/coco
+    enabled: false
+    train_ann: annotations/captions_train2017.json
+    val_ann: annotations/captions_val2017.json
+    train_images: train2017
+    val_images: val2017
+    sample_ratio: 30
+
+  vqav2:
+    name: VQA v2
+    type: vqa
+    path: data/vqa
+    enabled: false
+    images: data/coco
+    sample_ratio: 50
+
+  llava_instruct:
+    name: LLaVA Instruction Tuning
+    type: instruction
+    path: data/llava
+    enabled: false
+    images: data/coco
+    ann_file: llava_instruct_150k.json
+    sample_ratio: 100

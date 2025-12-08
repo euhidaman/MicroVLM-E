@@ -1,73 +1,35 @@
 # Evaluation configuration for MicroVLM-E
-  output_dir: eval_results
-  num_workers: 4
-  batch_size: 8
-  device: cuda
-run:
 
-      - accuracy@0.5
-    metrics:
-      - refcocog
-      - refcoco_plus
-      - refcoco
-    datasets:
-  grounding:
-  # Grounding evaluation
-
-      - meteor
-      - cider
-      - bleu
-    metrics:
-      - flickr30k
-      - coco
-    datasets:
-  captioning:
-  # Captioning evaluation
-
-      - gqa
-      - okvqa
-      - vqav2
-    datasets:
-  vqa:
-  # VQA evaluation
-
-    - grounding
-    - captioning
-    - vqa
-  tasks:
-  # Tasks to evaluate
-
-  num_beams: 5
-  do_sample: False
-  top_p: 0.9
-  temperature: 0.7
-  min_length: 1
-  max_new_tokens: 256
-  # Generation settings
-evaluation:
-
-  lora_alpha: 16
-  lora_r: 64
-  use_lora: True
-  # LoRA
-
-  max_context_len: 2048
-  max_txt_len: 512
-  llm_model: "Qwen/Qwen2.5-0.5B"
-  # LLM
-
-  qformer_num_layers: 6
-  qformer_hidden_size: 768
-  num_query_token: 32
-  # Q-Former
-
-  freeze_vit: True
-  image_size: 224
-  vision_encoder: diet_tiny
-  # Vision encoder
-
-  ckpt: ""  # Path to trained checkpoint
-  arch: microvlm
 model:
+  arch: microvlm
+  ckpt: ""
+  vision_encoder: diet_tiny
+  image_size: 224
+  freeze_vit: True
+  num_query_token: 32
+  qformer_hidden_size: 768
+  qformer_num_layers: 6
+  llm_model: "Qwen/Qwen2.5-0.5B"
+  max_txt_len: 512
+  max_context_len: 2048
+  use_lora: True
+  lora_r: 64
+  lora_alpha: 16
 
+evaluation:
+  max_new_tokens: 256
+  min_length: 1
+  temperature: 0.7
+  top_p: 0.9
+  do_sample: False
+  num_beams: 5
+  tasks:
+    - vqa
+    - captioning
+    - grounding
 
+run:
+  device: cuda
+  batch_size: 8
+  num_workers: 4
+  output_dir: eval_results

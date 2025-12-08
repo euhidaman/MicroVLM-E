@@ -1,34 +1,24 @@
 # Stage 4: Multi-Task Fine-Tuning
-# Trains: Q-Former, Projection layers, LoRA adapters
-# Uses diverse tasks: VQA, captioning, grounding, etc.
 
 model:
   arch: microvlm
   model_type: default
-  ckpt: ""  # Set to stage 3 checkpoint
-
-  # Vision encoder - frozen
+  ckpt: ""
   vision_encoder: diet_tiny
-  image_size: 448  # Higher resolution for stage 4
+  image_size: 448
   drop_path_rate: 0
   use_grad_checkpoint: True
   vit_precision: fp16
   freeze_vit: True
-
-  # Q-Former - trainable
   num_query_token: 32
   qformer_hidden_size: 768
   qformer_num_layers: 6
   cross_attention_freq: 2
   freeze_qformer: False
-
-  # LLM with LoRA
   llm_model: "Qwen/Qwen2.5-0.5B"
   max_txt_len: 1024
   max_context_len: 3800
   end_sym: "###"
-  prompt_template: ""
-  chat_template: True
   use_lora: True
   use_qlora: False
   lora_r: 64
@@ -36,41 +26,6 @@ model:
   lora_dropout: 0.05
 
 datasets:
-  # VQA datasets
-  vqav2:
-    batch_size: 4
-    vis_processor:
-      train:
-        name: blip2_image_train
-        image_size: 448
-    text_processor:
-      train:
-        name: blip_caption
-    sample_ratio: 50
-
-  okvqa:
-    batch_size: 4
-    vis_processor:
-      train:
-        name: blip2_image_train
-        image_size: 448
-    text_processor:
-      train:
-        name: blip_caption
-    sample_ratio: 20
-
-  gqa:
-    batch_size: 4
-    vis_processor:
-      train:
-        name: blip2_image_train
-        image_size: 448
-    text_processor:
-      train:
-        name: blip_caption
-    sample_ratio: 30
-
-  # Captioning datasets
   coco_caption:
     batch_size: 4
     vis_processor:
@@ -80,60 +35,26 @@ datasets:
     text_processor:
       train:
         name: blip_caption
-    sample_ratio: 30
-
-  # Instruction datasets
-  llava_instruct:
-    batch_size: 2
-    vis_processor:
-      train:
-        name: blip2_image_train
-        image_size: 448
-    text_processor:
-      train:
-        name: blip_caption
-    sample_ratio: 50
-
-  # Grounding datasets
-  refcoco:
-    batch_size: 4
-    vis_processor:
-      train:
-        name: blip2_image_train
-        image_size: 448
-    text_processor:
-      train:
-        name: blip_caption
-    sample_ratio: 40
+    sample_ratio: 100
 
 run:
   task: multi_task
   runner: runner_base
-
-  # Optimizer
   lr_sched: linear_warmup_cosine_lr
   init_lr: 2e-5
   min_lr: 5e-6
   warmup_lr: 1e-6
   warmup_steps: 500
-
   weight_decay: 0.05
   max_epoch: 3
   batch_size: 4
   num_workers: 4
   iters_per_epoch: 3000
   accum_grad_iters: 4
-
   amp: True
-
   output_dir: output/microvlm_stage4
   resume_ckpt_path: null
-
   device: cuda
-  world_size: 1
-  dist_url: "env://"
-  distributed: True
-
+  distributed: False
   seed: 42
   log_freq: 20
-

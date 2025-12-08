@@ -1,83 +1,56 @@
 # Stage 1: Basic Image-Text Feature Alignment
-  log_freq: 50
-  seed: 42
-
-  distributed: True
-  dist_url: "env://"
-  world_size: 1
-  device: cuda
-
-  output_dir: output/microvlm_stage1
-
-  amp: True
-
-  accum_grad_iters: 1
-  iters_per_epoch: 5000
-  num_workers: 4
-  batch_size: 64
-  max_epoch: 1
-  weight_decay: 0.05
-
-  warmup_steps: 1000
-  warmup_lr: 1e-6
-  min_lr: 8e-5
-  init_lr: 1e-4
-  lr_sched: linear_warmup_cosine_lr
-  # Optimizer
-
-  runner: runner_base
-  task: image_text_pretrain
-run:
-
-    sample_ratio: 14
-        name: blip_caption
-      train:
-    text_processor:
-        image_size: 224
-        name: blip2_image_train
-      train:
-    vis_processor:
-    batch_size: 64
-  cc_sbu:
-
-    sample_ratio: 115
-        name: blip_caption
-      train:
-    text_processor:
-        image_size: 224
-        name: blip2_image_train
-      train:
-    vis_processor:
-    batch_size: 64
-  laion:
-datasets:
-
-  use_qlora: False
-  use_lora: False
-  max_context_len: 2048
-  max_txt_len: 128
-  llm_model: "Qwen/Qwen2.5-0.5B"
-  # LLM - frozen (no LoRA in stage 1)
-
-  freeze_qformer: False
-  cross_attention_freq: 2
-  qformer_num_layers: 6
-  qformer_hidden_size: 768
-  num_query_token: 32
-  # Q-Former - trainable
-
-  freeze_vit: True
-  vit_precision: fp16
-  use_grad_checkpoint: False
-  drop_path_rate: 0
-  image_size: 224
-  vision_encoder: diet_tiny
-  # Vision encoder
-
-  model_type: default
-  arch: microvlm
-model:
-
-# Frozen: Vision encoder, LLM (no LoRA yet)
 # Trains: Q-Former, Projection layers
+# Frozen: Vision encoder, LLM (no LoRA yet)
 
+model:
+  arch: microvlm
+  model_type: default
+  vision_encoder: diet_tiny
+  image_size: 224
+  drop_path_rate: 0
+  use_grad_checkpoint: False
+  vit_precision: fp16
+  freeze_vit: True
+  num_query_token: 32
+  qformer_hidden_size: 768
+  qformer_num_layers: 6
+  cross_attention_freq: 2
+  freeze_qformer: False
+  llm_model: "Qwen/Qwen2.5-0.5B"
+  max_txt_len: 128
+  max_context_len: 2048
+  use_lora: False
+  use_qlora: False
+
+datasets:
+  coco_caption:
+    batch_size: 32
+    vis_processor:
+      train:
+        name: blip2_image_train
+        image_size: 224
+    text_processor:
+      train:
+        name: blip_caption
+    sample_ratio: 100
+
+run:
+  task: image_text_pretrain
+  runner: runner_base
+  lr_sched: linear_warmup_cosine_lr
+  init_lr: 1e-4
+  min_lr: 8e-5
+  warmup_lr: 1e-6
+  warmup_steps: 1000
+  weight_decay: 0.05
+  max_epoch: 1
+  batch_size: 32
+  num_workers: 4
+  iters_per_epoch: 5000
+  accum_grad_iters: 1
+  amp: True
+  output_dir: output/microvlm_stage1
+  device: cuda
+  distributed: False
+  seed: 42
+  log_freq: 50
