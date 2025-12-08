@@ -1,0 +1,77 @@
+[project]
+name = "microvlm-e"
+version = "0.1.0"
+description = "MicroVLM-E: Micro Vision-Language Model - Efficient"
+authors = [
+    {name = "MicroVLM Team"}
+]
+readme = "PROJECT_STRUCTURE.txt"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+keywords = ["vision-language", "multimodal", "deep-learning", "transformer", "vlm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.1.0",
+    "torchvision>=0.16.0",
+    "transformers>=4.36.0",
+    "peft>=0.7.0",
+    "accelerate>=0.25.0",
+    "bitsandbytes>=0.41.0",
+    "timm>=0.9.12",
+    "einops>=0.7.0",
+    "omegaconf>=2.3.0",
+    "Pillow>=10.0.0",
+    "tqdm>=4.66.0",
+    "numpy>=1.24.0",
+    "scipy>=1.11.0",
+    "requests>=2.31.0",
+    "huggingface_hub>=0.19.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "flake8>=6.0.0",
+]
+training = [
+    "wandb>=0.16.0",
+    "tensorboard>=2.15.0",
+    "datasets>=2.15.0",
+]
+data = [
+    "webdataset>=0.2.77",
+    "img2dataset>=1.45.0",
+]
+
+[project.scripts]
+microvlm-train = "train:main"
+microvlm-inference = "inference:main"
+microvlm-export = "export_model:main"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["microvlm_e*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+

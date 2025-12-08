@@ -1,0 +1,79 @@
+# Stage 3: Instruction Tuning
+# Trains: Q-Former, Projection layers, LoRA adapters
+# Uses instruction-following datasets
+
+model:
+  arch: microvlm
+  model_type: default
+  ckpt: ""  # Set to stage 2 checkpoint
+
+  # Vision encoder - frozen
+  vision_encoder: diet_tiny
+  image_size: 224
+  drop_path_rate: 0
+  use_grad_checkpoint: True
+  vit_precision: fp16
+  freeze_vit: True
+
+  # Q-Former - trainable
+  num_query_token: 32
+  qformer_hidden_size: 768
+  qformer_num_layers: 6
+  cross_attention_freq: 2
+  freeze_qformer: False
+
+  # LLM with LoRA
+  llm_model: "Qwen/Qwen2.5-0.5B"
+  max_txt_len: 512
+  max_context_len: 3800
+  end_sym: "###"
+  prompt_template: "###Human: {} ###Assistant: "
+  use_lora: True
+  use_qlora: False
+  lora_r: 64
+  lora_alpha: 16
+  lora_dropout: 0.05
+
+datasets:
+  llava_instruct:
+    batch_size: 6
+    vis_processor:
+      train:
+        name: blip2_image_train
+        image_size: 224
+    text_processor:
+      train:
+        name: blip_caption
+    sample_ratio: 100
+
+run:
+  task: instruction_tuning
+  runner: runner_base
+
+  # Optimizer (lower LR for fine-tuning)
+  lr_sched: linear_warmup_cosine_lr
+  init_lr: 3e-5
+  min_lr: 1e-5
+  warmup_lr: 1e-6
+  warmup_steps: 200
+
+  weight_decay: 0.05
+  max_epoch: 5
+  batch_size: 6
+  num_workers: 4
+  iters_per_epoch: 1000
+  accum_grad_iters: 4
+
+  amp: True
+
+  output_dir: output/microvlm_stage3
+  resume_ckpt_path: null
+
+  device: cuda
+  world_size: 1
+  dist_url: "env://"
+  distributed: True
+
+  seed: 42
+  log_freq: 20
+

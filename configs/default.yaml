@@ -1,0 +1,60 @@
+# Default configuration for MicroVLM-E
+  seed: 42
+
+  distributed: False
+  device: cuda
+
+  output_dir: output/microvlm
+
+  amp: True
+
+  accum_grad_iters: 1
+  num_workers: 4
+  batch_size: 8
+  max_epoch: 1
+  weight_decay: 0.05
+
+  warmup_steps: 1000
+  warmup_lr: 1e-6
+  min_lr: 1e-5
+  init_lr: 1e-4
+  lr_sched: linear_warmup_cosine_lr
+  # Optimizer
+
+  runner: runner_base
+  task: image_text_pretrain
+run:
+
+  lora_dropout: 0.05
+  lora_alpha: 16
+  lora_r: 64
+  use_qlora: False
+  use_lora: True
+  # LoRA settings
+
+  end_sym: "\n"
+  max_context_len: 2048
+  max_txt_len: 512
+  llm_model: "Qwen/Qwen2.5-0.5B"
+  # Language model
+
+  freeze_qformer: False
+  cross_attention_freq: 2
+  qformer_num_layers: 6
+  qformer_hidden_size: 768
+  num_query_token: 32
+  # Q-Former
+
+  freeze_vit: True
+  vit_precision: fp16
+  use_grad_checkpoint: False
+  drop_path_rate: 0
+  image_size: 224
+  vision_encoder: diet_tiny
+  # Vision encoder: diet_tiny or diet_small
+
+  model_type: default
+  arch: microvlm
+model:
+
+
