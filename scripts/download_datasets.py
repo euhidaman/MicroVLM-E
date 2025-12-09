@@ -2,105 +2,97 @@
 Dataset download and preparation script for MicroVLM-E.
 
 Downloads and prepares all required datasets for training:
-- LAION subsets
-- CC3M (Conceptual Captions 3M)
+- COCO (captioning) - Primary dataset
 - SBU Captions
-- COCO (captioning)
-- Flickr30k
 - VQA datasets (VQAv2, OK-VQA, A-OKVQA, GQA)
 - REC datasets (RefCOCO, RefCOCO+, RefCOCOg)
-- OCR-VQA
 - LLaVA instruction tuning data
+
+This script attempts to download ALL resources without early-exit checks.
+Resources requiring special access/credentials are logged and skipped.
 
 Usage:
     python scripts/download_datasets.py --all
-    python scripts/download_datasets.py --datasets coco vqa
-    python scripts/download_datasets.py --config configs/datasets/data_config.yaml
+    python scripts/download_datasets.py --datasets coco vqav2
 """
 
 import argparse
 import os
-import json
 import subprocess
-import shutil
 import logging
-from pathlib import Path
-from typing import List, Optional, Dict, Any
+import zipfile
+import tarfile
 from urllib.parse import urlparse
+from typing import Dict, List, Tuple
 
 import requests
 from tqdm import tqdm
 
 
-# Dataset download configurations
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# DATASET CONFIGURATIONS
+# =============================================================================
+# All datasets that can be directly downloaded without special credentials
+
 DATASET_CONFIGS = {
-    # Image-Text Pretraining Datasets
-    "laion": {
-        "name": "LAION-400M Subset",
-        "type": "image_text",
-        "urls": [
-            # LAION samples - use img2dataset to download
-        ],
-        "instructions": "Use img2dataset to download LAION subsets. See https://github.com/rom1504/img2dataset",
-        "output_dir": "data/laion",
-    },
-
-    "cc3m": {
-        "name": "Conceptual Captions 3M",
-        "type": "image_text",
-        "urls": [
-            "https://storage.googleapis.com/gcc-data/Train/GCC-training.tsv",
-        ],
-        "instructions": "Download TSV and use img2dataset to download images",
-        "output_dir": "data/cc3m",
-    },
-
-    "sbu": {
-        "name": "SBU Captions",
-        "type": "image_text",
-        "urls": [
-            "https://www.cs.rice.edu/~vo9/sbucaptions/sbu-captions-all.tar.gz",
-        ],
-        "output_dir": "data/sbu",
-    },
-
-    # Captioning Datasets
+    # =========================================================================
+    # CAPTIONING DATASETS
+    # =========================================================================
     "coco": {
         "name": "COCO 2017",
         "type": "captioning",
+        "description": "Primary image-caption dataset for training",
         "urls": [
             "http://images.cocodataset.org/zips/train2017.zip",
             "http://images.cocodataset.org/zips/val2017.zip",
             "http://images.cocodataset.org/annotations/annotations_trainval2017.zip",
         ],
         "output_dir": "data/coco",
+        "size_estimate": "~25 GB",
     },
 
-    "flickr30k": {
-        "name": "Flickr30k",
-        "type": "captioning",
-        "urls": [],  # Requires Kaggle credentials
-        "instructions": "Download from Kaggle: https://www.kaggle.com/datasets/hsankesara/flickr-image-dataset",
-        "output_dir": "data/flickr30k",
+    "sbu": {
+        "name": "SBU Captions",
+        "type": "image_text",
+        "description": "Image-caption pairs from Flickr",
+        "urls": [
+            "https://www.cs.rice.edu/~vo9/sbucaptions/sbu-captions-all.tar.gz",
+        ],
+        "output_dir": "data/sbu",
+        "size_estimate": "~14 GB",
     },
 
-    # VQA Datasets
+    # =========================================================================
+    # VQA DATASETS
+    # =========================================================================
     "vqav2": {
         "name": "VQA v2",
         "type": "vqa",
+        "description": "Visual Question Answering v2 dataset",
         "urls": [
             "https://s3.amazonaws.com/cvmlp/vqa/mscoco/vqa/v2_Questions_Train_mscoco.zip",
             "https://s3.amazonaws.com/cvmlp/vqa/mscoco/vqa/v2_Questions_Val_mscoco.zip",
             "https://s3.amazonaws.com/cvmlp/vqa/mscoco/vqa/v2_Annotations_Train_mscoco.zip",
             "https://s3.amazonaws.com/cvmlp/vqa/mscoco/vqa/v2_Annotations_Val_mscoco.zip",
         ],
-        "images": "coco",  # Uses COCO images
+        "images": "coco",
         "output_dir": "data/vqa",
+        "size_estimate": "~200 MB",
     },
 
     "okvqa": {
         "name": "OK-VQA",
         "type": "vqa",
+        "description": "Outside Knowledge VQA dataset",
         "urls": [
             "https://okvqa.allenai.org/static/data/OpenEnded_mscoco_train2014_questions.json.zip",
             "https://okvqa.allenai.org/static/data/OpenEnded_mscoco_val2014_questions.json.zip",
@@ -109,391 +101,524 @@ DATASET_CONFIGS = {
         ],
         "images": "coco",
         "output_dir": "data/okvqa",
+        "size_estimate": "~50 MB",
     },
 
     "aokvqa": {
         "name": "A-OKVQA",
         "type": "vqa",
+        "description": "Augmented OK-VQA with rationales",
         "urls": [
             "https://prior-datasets.s3.us-east-2.amazonaws.com/aokvqa/aokvqa_v1p0.tar.gz",
         ],
         "images": "coco",
         "output_dir": "data/aokvqa",
+        "size_estimate": "~100 MB",
     },
 
     "gqa": {
         "name": "GQA",
         "type": "vqa",
+        "description": "Visual reasoning dataset with scene graphs",
         "urls": [
             "https://downloads.cs.stanford.edu/nlp/data/gqa/questions1.2.zip",
             "https://downloads.cs.stanford.edu/nlp/data/gqa/images.zip",
         ],
         "output_dir": "data/gqa",
+        "size_estimate": "~20 GB",
     },
 
-    "ocrvqa": {
-        "name": "OCR-VQA",
-        "type": "vqa",
-        "urls": [
-            # OCR-VQA requires Google Drive download
-        ],
-        "instructions": "Download from https://ocr-vqa.github.io/",
-        "output_dir": "data/ocrvqa",
-    },
-
-    # Referring Expression Comprehension
+    # =========================================================================
+    # REFERRING EXPRESSION COMPREHENSION
+    # =========================================================================
     "refcoco": {
         "name": "RefCOCO",
         "type": "rec",
+        "description": "Referring expression comprehension dataset",
         "urls": [
             "https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcoco.zip",
         ],
         "images": "coco",
         "output_dir": "data/refcoco",
+        "size_estimate": "~50 MB",
     },
 
     "refcoco_plus": {
         "name": "RefCOCO+",
         "type": "rec",
+        "description": "RefCOCO+ with no location words",
         "urls": [
             "https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcoco+.zip",
         ],
         "images": "coco",
         "output_dir": "data/refcoco_plus",
+        "size_estimate": "~50 MB",
     },
 
     "refcocog": {
         "name": "RefCOCOg",
         "type": "rec",
+        "description": "RefCOCOg with longer expressions",
         "urls": [
             "https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcocog.zip",
         ],
         "images": "coco",
         "output_dir": "data/refcocog",
+        "size_estimate": "~50 MB",
     },
 
-    # Instruction Tuning
+    # =========================================================================
+    # INSTRUCTION TUNING
+    # =========================================================================
     "llava_instruct": {
         "name": "LLaVA Instruction Tuning",
         "type": "instruction",
+        "description": "LLaVA 150K instruction-following dataset",
         "urls": [
             "https://huggingface.co/datasets/liuhaotian/LLaVA-Instruct-150K/resolve/main/llava_instruct_150k.json",
         ],
         "images": "coco",
         "output_dir": "data/llava",
+        "size_estimate": "~300 MB",
     },
 }
 
 
-def setup_logging():
-    """Setup logging configuration."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="[%(asctime)s] [%(levelname)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+# =============================================================================
+# DATASETS REQUIRING SPECIAL ACCESS (logged and skipped)
+# =============================================================================
+
+SPECIAL_ACCESS_DATASETS = {
+    "laion": {
+        "name": "LAION-400M Subset",
+        "reason": "Requires img2dataset tool and LAION metadata from HuggingFace",
+        "instructions": "pip install img2dataset; download metadata from https://huggingface.co/datasets/laion/laion400m",
+    },
+    "cc3m": {
+        "name": "Conceptual Captions 3M",
+        "reason": "Requires img2dataset tool to download images from TSV URLs",
+        "instructions": "pip install img2dataset; download TSV from https://ai.google.com/research/ConceptualCaptions",
+    },
+    "flickr30k": {
+        "name": "Flickr30k",
+        "reason": "Requires Kaggle account and API credentials",
+        "instructions": "Create Kaggle account, get API token, run: kaggle datasets download -d hsankesara/flickr-image-dataset",
+    },
+    "ocrvqa": {
+        "name": "OCR-VQA",
+        "reason": "Requires manual download from Google Drive",
+        "instructions": "Download from https://ocr-vqa.github.io/",
+    },
+}
 
 
-def download_file(url: str, output_path: str, chunk_size: int = 8192) -> bool:
+# =============================================================================
+# DOWNLOAD FUNCTIONS
+# =============================================================================
+
+def download_file(url: str, output_path: str, chunk_size: int = 8192) -> Tuple[bool, str]:
     """
     Download a file from URL with progress bar.
 
-    Args:
-        url: URL to download from.
-        output_path: Local path to save file.
-        chunk_size: Download chunk size.
-
     Returns:
-        True if successful, False otherwise.
+        Tuple of (success: bool, error_message: str)
     """
     try:
-        response = requests.get(url, stream=True)
+        logger.info(f"Downloading: {url}")
+
+        # Make request with timeout
+        response = requests.get(url, stream=True, timeout=30)
         response.raise_for_status()
 
         total_size = int(response.headers.get("content-length", 0))
 
+        # Ensure directory exists
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
+        # Download with progress bar
         with open(output_path, "wb") as f:
-            with tqdm(total=total_size, unit="B", unit_scale=True, desc=os.path.basename(output_path)) as pbar:
+            with tqdm(total=total_size, unit="B", unit_scale=True,
+                     desc=os.path.basename(output_path)) as pbar:
                 for chunk in response.iter_content(chunk_size=chunk_size):
                     if chunk:
                         f.write(chunk)
                         pbar.update(len(chunk))
 
-        return True
+        logger.info(f"Successfully downloaded: {os.path.basename(output_path)}")
+        return True, ""
+
+    except requests.exceptions.HTTPError as e:
+        error_msg = f"HTTP Error {e.response.status_code}: {str(e)}"
+        logger.error(f"Failed to download {url}: {error_msg}")
+        return False, error_msg
+
+    except requests.exceptions.ConnectionError as e:
+        error_msg = f"Connection Error: {str(e)}"
+        logger.error(f"Failed to download {url}: {error_msg}")
+        return False, error_msg
+
+    except requests.exceptions.Timeout as e:
+        error_msg = f"Timeout Error: {str(e)}"
+        logger.error(f"Failed to download {url}: {error_msg}")
+        return False, error_msg
+
     except Exception as e:
-        logging.error(f"Failed to download {url}: {e}")
-        return False
+        error_msg = f"Unexpected Error: {str(e)}"
+        logger.error(f"Failed to download {url}: {error_msg}")
+        return False, error_msg
 
 
-def extract_archive(archive_path: str, output_dir: str) -> bool:
+def extract_archive(archive_path: str, output_dir: str) -> Tuple[bool, str]:
     """
-    Extract archive file.
-
-    Args:
-        archive_path: Path to archive file.
-        output_dir: Directory to extract to.
+    Extract archive file (zip, tar.gz, tar).
 
     Returns:
-        True if successful, False otherwise.
+        Tuple of (success: bool, error_message: str)
     """
     try:
+        logger.info(f"Extracting: {os.path.basename(archive_path)}")
         os.makedirs(output_dir, exist_ok=True)
 
         if archive_path.endswith(".zip"):
-            import zipfile
             with zipfile.ZipFile(archive_path, "r") as zip_ref:
                 zip_ref.extractall(output_dir)
+
         elif archive_path.endswith((".tar.gz", ".tgz")):
-            import tarfile
             with tarfile.open(archive_path, "r:gz") as tar_ref:
                 tar_ref.extractall(output_dir)
+
         elif archive_path.endswith(".tar"):
-            import tarfile
             with tarfile.open(archive_path, "r") as tar_ref:
                 tar_ref.extractall(output_dir)
         else:
-            logging.warning(f"Unknown archive format: {archive_path}")
-            return False
+            return False, f"Unknown archive format: {archive_path}"
 
-        return True
+        logger.info(f"Successfully extracted: {os.path.basename(archive_path)}")
+        return True, ""
+
+    except zipfile.BadZipFile as e:
+        error_msg = f"Bad ZIP file: {str(e)}"
+        logger.error(f"Failed to extract {archive_path}: {error_msg}")
+        return False, error_msg
+
+    except tarfile.TarError as e:
+        error_msg = f"TAR error: {str(e)}"
+        logger.error(f"Failed to extract {archive_path}: {error_msg}")
+        return False, error_msg
+
     except Exception as e:
-        logging.error(f"Failed to extract {archive_path}: {e}")
-        return False
+        error_msg = f"Extraction error: {str(e)}"
+        logger.error(f"Failed to extract {archive_path}: {error_msg}")
+        return False, error_msg
 
 
-def download_dataset(dataset_name: str, data_root: str = "data") -> bool:
+def download_dataset(dataset_name: str, data_root: str = "data") -> Dict:
     """
-    Download a specific dataset.
-
-    Args:
-        dataset_name: Name of the dataset to download.
-        data_root: Root directory for data.
+    Download a specific dataset. Attempts all URLs without early exit.
 
     Returns:
-        True if successful, False otherwise.
+        Dictionary with download results for each URL
     """
     if dataset_name not in DATASET_CONFIGS:
-        logging.error(f"Unknown dataset: {dataset_name}")
-        return False
+        logger.error(f"Unknown dataset: {dataset_name}")
+        return {"status": "error", "reason": "Unknown dataset"}
 
     config = DATASET_CONFIGS[dataset_name]
     output_dir = os.path.join(data_root, os.path.basename(config["output_dir"]))
 
-    logging.info(f"\n{'='*50}")
-    logging.info(f"Downloading: {config['name']}")
-    logging.info(f"Output directory: {output_dir}")
-    logging.info(f"{'='*50}")
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info(f"DATASET: {config['name']}")
+    logger.info(f"Description: {config['description']}")
+    logger.info(f"Output: {output_dir}")
+    logger.info(f"Estimated size: {config.get('size_estimate', 'Unknown')}")
+    logger.info("=" * 70)
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Check for special instructions
-    if not config.get("urls") and config.get("instructions"):
-        logging.warning(f"Manual download required: {config['instructions']}")
-        return False
+    results = {
+        "dataset": dataset_name,
+        "name": config["name"],
+        "output_dir": output_dir,
+        "urls": [],
+        "downloaded": 0,
+        "failed": 0,
+        "skipped": 0,
+    }
 
-    # Download each URL
+    # Attempt to download ALL URLs (no early exit)
     for url in config.get("urls", []):
         filename = os.path.basename(urlparse(url).path)
         download_path = os.path.join(output_dir, filename)
 
+        url_result = {
+            "url": url,
+            "filename": filename,
+            "status": None,
+            "error": None,
+        }
+
+        # Check if already exists
         if os.path.exists(download_path):
-            logging.info(f"Already downloaded: {filename}")
+            logger.info(f"Already exists, skipping: {filename}")
+            url_result["status"] = "skipped"
+            url_result["error"] = "File already exists"
+            results["skipped"] += 1
+            results["urls"].append(url_result)
             continue
 
-        logging.info(f"Downloading: {url}")
-        if not download_file(url, download_path):
-            continue
+        # Attempt download
+        success, error = download_file(url, download_path)
 
-        # Extract if archive
-        if filename.endswith((".zip", ".tar.gz", ".tgz", ".tar")):
-            logging.info(f"Extracting: {filename}")
-            extract_archive(download_path, output_dir)
+        if success:
+            url_result["status"] = "downloaded"
+            results["downloaded"] += 1
 
-    logging.info(f"Completed: {config['name']}")
-    return True
+            # Attempt extraction if archive
+            if filename.endswith((".zip", ".tar.gz", ".tgz", ".tar")):
+                extract_success, extract_error = extract_archive(download_path, output_dir)
+                if not extract_success:
+                    url_result["extraction_error"] = extract_error
+        else:
+            url_result["status"] = "failed"
+            url_result["error"] = error
+            results["failed"] += 1
 
+        results["urls"].append(url_result)
 
-def download_all_datasets(data_root: str = "data") -> Dict[str, bool]:
-    """
-    Download all datasets.
-
-    Args:
-        data_root: Root directory for data.
-
-    Returns:
-        Dictionary mapping dataset names to success status.
-    """
-    results = {}
-
-    for dataset_name in DATASET_CONFIGS:
-        results[dataset_name] = download_dataset(dataset_name, data_root)
+    # Summary for this dataset
+    total = len(config.get("urls", []))
+    logger.info(f"Completed {config['name']}: {results['downloaded']}/{total} downloaded, "
+                f"{results['failed']} failed, {results['skipped']} skipped")
 
     return results
 
 
-def create_dataset_config(data_root: str = "data", output_path: str = "configs/datasets/data_config.yaml"):
+def download_all_datasets(data_root: str = "data") -> Dict:
     """
-    Create a YAML configuration file for dataset paths.
+    Download ALL datasets. No early exit, attempts everything.
 
-    Args:
-        data_root: Root directory for data.
-        output_path: Path to save configuration.
+    Returns:
+        Complete results dictionary
     """
-    import yaml
-
-    config = {
-        "data_root": data_root,
-        "datasets": {}
+    all_results = {
+        "downloaded_datasets": [],
+        "failed_datasets": [],
+        "skipped_special_access": [],
+        "total_files_downloaded": 0,
+        "total_files_failed": 0,
+        "total_files_skipped": 0,
     }
 
-    for dataset_name, dataset_config in DATASET_CONFIGS.items():
-        output_dir = os.path.join(data_root, os.path.basename(dataset_config["output_dir"]))
-        config["datasets"][dataset_name] = {
-            "name": dataset_config["name"],
-            "type": dataset_config["type"],
+    logger.info("")
+    logger.info("#" * 70)
+    logger.info("# STARTING FULL DATASET DOWNLOAD")
+    logger.info("# No failsafe checks - attempting all downloads")
+    logger.info("#" * 70)
+
+    # First, log all special access datasets that will be skipped
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("DATASETS REQUIRING SPECIAL ACCESS (will be skipped):")
+    logger.info("=" * 70)
+
+    for ds_name, ds_info in SPECIAL_ACCESS_DATASETS.items():
+        logger.warning(f"  SKIPPED: {ds_info['name']}")
+        logger.warning(f"    Reason: {ds_info['reason']}")
+        logger.warning(f"    Instructions: {ds_info['instructions']}")
+        all_results["skipped_special_access"].append({
+            "dataset": ds_name,
+            "name": ds_info["name"],
+            "reason": ds_info["reason"],
+            "instructions": ds_info["instructions"],
+        })
+
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("DOWNLOADING AVAILABLE DATASETS:")
+    logger.info("=" * 70)
+
+    # Download all available datasets
+    for dataset_name in DATASET_CONFIGS:
+        result = download_dataset(dataset_name, data_root)
+
+        all_results["total_files_downloaded"] += result.get("downloaded", 0)
+        all_results["total_files_failed"] += result.get("failed", 0)
+        all_results["total_files_skipped"] += result.get("skipped", 0)
+
+        if result.get("failed", 0) == 0 and result.get("downloaded", 0) > 0:
+            all_results["downloaded_datasets"].append(dataset_name)
+        elif result.get("failed", 0) > 0:
+            all_results["failed_datasets"].append({
+                "dataset": dataset_name,
+                "result": result,
+            })
+
+    return all_results
+
+
+def print_final_summary(results: Dict):
+    """Print comprehensive final summary."""
+    print("")
+    print("#" * 70)
+    print("# DOWNLOAD COMPLETE - FINAL SUMMARY")
+    print("#" * 70)
+
+    print("")
+    print("FILES:")
+    print(f"  Downloaded: {results['total_files_downloaded']}")
+    print(f"  Failed:     {results['total_files_failed']}")
+    print(f"  Skipped:    {results['total_files_skipped']} (already existed)")
+
+    print("")
+    print("SUCCESSFULLY DOWNLOADED DATASETS:")
+    if results["downloaded_datasets"]:
+        for ds in results["downloaded_datasets"]:
+            config = DATASET_CONFIGS.get(ds, {})
+            print(f"  ✓ {config.get('name', ds)}")
+    else:
+        print("  (none)")
+
+    print("")
+    print("FAILED DATASETS:")
+    if results["failed_datasets"]:
+        for item in results["failed_datasets"]:
+            ds = item["dataset"]
+            config = DATASET_CONFIGS.get(ds, {})
+            print(f"  ✗ {config.get('name', ds)}")
+            for url_info in item["result"].get("urls", []):
+                if url_info["status"] == "failed":
+                    print(f"      - {url_info['filename']}: {url_info['error']}")
+    else:
+        print("  (none)")
+
+    print("")
+    print("SKIPPED (REQUIRE SPECIAL ACCESS):")
+    if results["skipped_special_access"]:
+        for item in results["skipped_special_access"]:
+            print(f"  ⊘ {item['name']}")
+            print(f"      Reason: {item['reason']}")
+    else:
+        print("  (none)")
+
+    print("")
+    print("#" * 70)
+
+
+def print_status(data_root: str = "data"):
+    """Print current dataset status."""
+    print("")
+    print("=" * 70)
+    print("DATASET STATUS")
+    print("=" * 70)
+
+    print("")
+    print("DOWNLOADABLE DATASETS:")
+    print("-" * 70)
+    for ds_name, config in DATASET_CONFIGS.items():
+        output_dir = os.path.join(data_root, os.path.basename(config["output_dir"]))
+        exists = os.path.exists(output_dir) and len(os.listdir(output_dir)) > 0
+        status = "✓ Present" if exists else "✗ Missing"
+        print(f"  {config['name']:<35} {status}")
+        print(f"      Size: {config.get('size_estimate', 'Unknown'):<15} Path: {output_dir}")
+
+    print("")
+    print("SPECIAL ACCESS DATASETS (require manual download):")
+    print("-" * 70)
+    for ds_name, config in SPECIAL_ACCESS_DATASETS.items():
+        print(f"  ⊘ {config['name']}")
+        print(f"      {config['reason']}")
+
+    print("")
+    print("=" * 70)
+
+
+def create_dataset_config(data_root: str = "data", output_path: str = "configs/datasets/data_config.yaml"):
+    """Create YAML configuration file for dataset paths."""
+    try:
+        import yaml
+    except ImportError:
+        logger.warning("PyYAML not installed. Creating JSON config instead.")
+        output_path = output_path.replace(".yaml", ".json")
+        import json
+
+        config = {"data_root": data_root, "datasets": {}}
+        for ds_name, ds_config in DATASET_CONFIGS.items():
+            output_dir = os.path.join(data_root, os.path.basename(ds_config["output_dir"]))
+            config["datasets"][ds_name] = {
+                "name": ds_config["name"],
+                "type": ds_config["type"],
+                "path": output_dir,
+                "enabled": os.path.exists(output_dir),
+            }
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(config, f, indent=2)
+
+        logger.info(f"Dataset configuration saved to: {output_path}")
+        return
+
+    config = {"data_root": data_root, "datasets": {}}
+    for ds_name, ds_config in DATASET_CONFIGS.items():
+        output_dir = os.path.join(data_root, os.path.basename(ds_config["output_dir"]))
+        config["datasets"][ds_name] = {
+            "name": ds_config["name"],
+            "type": ds_config["type"],
             "path": output_dir,
             "enabled": os.path.exists(output_dir),
         }
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
     with open(output_path, "w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
-    logging.info(f"Dataset configuration saved to: {output_path}")
-
-
-def download_with_img2dataset(
-    url_list: str,
-    output_dir: str,
-    image_size: int = 256,
-    processes: int = 16,
-) -> bool:
-    """
-    Download images using img2dataset.
-
-    Args:
-        url_list: Path to TSV/parquet file with URLs.
-        output_dir: Output directory.
-        image_size: Target image size.
-        processes: Number of download processes.
-
-    Returns:
-        True if successful, False otherwise.
-    """
-    try:
-        cmd = [
-            "img2dataset",
-            "--url_list", url_list,
-            "--output_folder", output_dir,
-            "--image_size", str(image_size),
-            "--processes_count", str(processes),
-            "--output_format", "webdataset",
-            "--resize_mode", "center_crop",
-        ]
-
-        subprocess.run(cmd, check=True)
-        return True
-    except Exception as e:
-        logging.error(f"img2dataset failed: {e}")
-        return False
-
-
-def prepare_cc3m(data_root: str = "data"):
-    """
-    Prepare CC3M dataset (requires manual TSV download).
-
-    Args:
-        data_root: Root directory for data.
-    """
-    cc3m_dir = os.path.join(data_root, "cc3m")
-    tsv_path = os.path.join(cc3m_dir, "GCC-training.tsv")
-
-    if not os.path.exists(tsv_path):
-        logging.warning(f"Please download CC3M TSV file to: {tsv_path}")
-        logging.warning("Download from: https://ai.google.com/research/ConceptualCaptions/download")
-        return
-
-    logging.info("Downloading CC3M images with img2dataset...")
-    download_with_img2dataset(
-        url_list=tsv_path,
-        output_dir=os.path.join(cc3m_dir, "images"),
-        image_size=256,
-    )
-
-
-def prepare_laion_subset(
-    data_root: str = "data",
-    num_samples: int = 1000000,
-):
-    """
-    Prepare LAION subset for training.
-
-    Args:
-        data_root: Root directory for data.
-        num_samples: Number of samples to download.
-    """
-    laion_dir = os.path.join(data_root, "laion")
-    os.makedirs(laion_dir, exist_ok=True)
-
-    logging.info("To download LAION subset:")
-    logging.info("1. Install img2dataset: pip install img2dataset")
-    logging.info("2. Download metadata from: https://laion.ai/blog/laion-400-open-dataset/")
-    logging.info("3. Run img2dataset on the parquet files")
-    logging.info(f"4. Output will be in: {laion_dir}")
-
-
-def print_status(data_root: str = "data"):
-    """Print dataset download status."""
-    print("\n" + "=" * 60)
-    print("Dataset Download Status")
-    print("=" * 60)
-
-    for dataset_name, config in DATASET_CONFIGS.items():
-        output_dir = os.path.join(data_root, os.path.basename(config["output_dir"]))
-        exists = os.path.exists(output_dir)
-        status = "✓ Downloaded" if exists else "✗ Missing"
-        print(f"  {config['name']:<30} {status}")
-
-    print("=" * 60)
+    logger.info(f"Dataset configuration saved to: {output_path}")
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Download datasets for MicroVLM-E")
+    parser = argparse.ArgumentParser(
+        description="Download datasets for MicroVLM-E training",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  Download all available datasets:
+    python scripts/download_datasets.py --all
+
+  Download specific datasets:
+    python scripts/download_datasets.py --datasets coco vqav2 llava_instruct
+
+  Check current status:
+    python scripts/download_datasets.py --status
+        """
+    )
 
     parser.add_argument(
         "--all",
         action="store_true",
-        help="Download all datasets."
+        help="Download all available datasets (no early exit, attempts everything)"
     )
     parser.add_argument(
         "--datasets",
         nargs="+",
         choices=list(DATASET_CONFIGS.keys()),
-        help="Specific datasets to download."
+        help="Specific datasets to download"
     )
     parser.add_argument(
         "--data-root",
         type=str,
         default="data",
-        help="Root directory for data."
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        help="Path to dataset configuration file."
-    )
-    parser.add_argument(
-        "--create-config",
-        action="store_true",
-        help="Create dataset configuration file."
+        help="Root directory for data storage (default: data)"
     )
     parser.add_argument(
         "--status",
         action="store_true",
-        help="Print dataset download status."
+        help="Print current dataset download status"
+    )
+    parser.add_argument(
+        "--create-config",
+        action="store_true",
+        help="Create/update dataset configuration file"
     )
 
     return parser.parse_args()
@@ -501,9 +626,8 @@ def parse_args():
 
 def main():
     args = parse_args()
-    setup_logging()
 
-    # Create data root directory
+    # Create data root
     os.makedirs(args.data_root, exist_ok=True)
 
     if args.status:
@@ -515,28 +639,56 @@ def main():
         return
 
     if args.all:
-        logging.info("Downloading all datasets...")
+        # Download everything possible
         results = download_all_datasets(args.data_root)
-
-        # Print summary
-        print("\n" + "=" * 50)
-        print("Download Summary")
-        print("=" * 50)
-        for name, success in results.items():
-            status = "✓ Success" if success else "✗ Failed"
-            print(f"  {name}: {status}")
-        print("=" * 50)
+        print_final_summary(results)
 
     elif args.datasets:
+        # Download specified datasets
+        results = {
+            "downloaded_datasets": [],
+            "failed_datasets": [],
+            "skipped_special_access": [],
+            "total_files_downloaded": 0,
+            "total_files_failed": 0,
+            "total_files_skipped": 0,
+        }
+
         for dataset_name in args.datasets:
-            download_dataset(dataset_name, args.data_root)
+            if dataset_name in SPECIAL_ACCESS_DATASETS:
+                info = SPECIAL_ACCESS_DATASETS[dataset_name]
+                logger.warning(f"SKIPPED: {info['name']} - {info['reason']}")
+                results["skipped_special_access"].append({
+                    "dataset": dataset_name,
+                    "name": info["name"],
+                    "reason": info["reason"],
+                    "instructions": info["instructions"],
+                })
+                continue
+
+            result = download_dataset(dataset_name, args.data_root)
+            results["total_files_downloaded"] += result.get("downloaded", 0)
+            results["total_files_failed"] += result.get("failed", 0)
+            results["total_files_skipped"] += result.get("skipped", 0)
+
+            if result.get("failed", 0) == 0:
+                results["downloaded_datasets"].append(dataset_name)
+            else:
+                results["failed_datasets"].append({
+                    "dataset": dataset_name,
+                    "result": result,
+                })
+
+        print_final_summary(results)
 
     else:
-        logging.info("No datasets specified. Use --all or --datasets to download.")
+        print("No action specified. Use --all, --datasets, or --status")
+        print("Run with --help for more information")
         print_status(args.data_root)
 
-    # Create configuration file
-    create_dataset_config(args.data_root)
+    # Always create/update config after downloads
+    if args.all or args.datasets:
+        create_dataset_config(args.data_root)
 
 
 if __name__ == "__main__":
