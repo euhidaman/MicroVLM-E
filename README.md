@@ -484,11 +484,12 @@ If you see only a few files and 0 images for CC3M/LAION, the img2dataset step ha
 pip install img2dataset
 ```
 
-**Issue: "LAION download failed - 401 Unauthorized"**
-You need HuggingFace authentication:
+**Issue: "LAION download failed - 404 Not Found"**
+The LAION dataset structure may have changed on HuggingFace. The script now uses the HuggingFace datasets library to download the dataset directly. Make sure you have:
 ```bash
-huggingface-cli login
+pip install datasets huggingface_hub
 ```
+If the issue persists, you can skip LAION and train with just CC3M and COCO.
 
 **Issue: "RefCOCO download failed"**
 The old UNC server URLs are broken. The script now automatically downloads from HuggingFace instead.
@@ -502,11 +503,15 @@ Re-run the download script - it will skip downloading and extract any unextracte
 python scripts/download_datasets.py --all
 ```
 
-**Issue: "CC3M/LAION show 0 images"**
-The TSV/parquet files are downloaded but img2dataset hasn't run yet:
+**Issue: "CC3M/LAION show 0 images" or "img2dataset completes immediately"**
+The TSV/parquet files are downloaded but img2dataset is having issues:
 1. Ensure img2dataset is installed: `pip install img2dataset`
-2. Re-run the download script: `python scripts/download_datasets.py --all`
-3. The script will automatically run img2dataset for CC3M and LAION
+2. Check if the TSV file has the correct format (should have 'url' and 'caption' columns)
+3. The script now explicitly specifies input format and column names
+4. Check the img2dataset output in the logs for specific errors
+5. Re-run: `python scripts/download_datasets.py --all`
+
+If img2dataset continues to fail, you can train without CC3M/LAION using just COCO and other datasets.
 
 **Issue: "Out of disk space"**
 Full dataset download requires ~300-400 GB. You can download specific datasets to save space:

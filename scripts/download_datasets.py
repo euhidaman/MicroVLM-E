@@ -116,13 +116,11 @@ DATASET_CONFIGS = {
         "type": "image_text",
         "description": "LAION subset filtered with COCO-style captions",
         "hf_dataset": "laion/relaion-coco",
-        "hf_files": [
-            "part-00000-5b54c5d5-bbcf-484d-a2ce-0d6f73df1a36-c000.snappy.parquet",
-        ],
+        "use_hf_datasets": True,  # Use datasets library to download
         "output_dir": "data/laion",
         "size_estimate": "Parquet ~600 MB, Images ~50 GB with img2dataset",
         "post_download": "laion_setup",
-        "requires_hf_token": True,
+        "requires_hf_token": False,  # Actually public dataset
     },
 
     # =========================================================================
@@ -744,6 +742,9 @@ def setup_cc3m_with_img2dataset(output_dir: str) -> bool:
         cmd = [
             "img2dataset",
             "--url_list", tsv_path,
+            "--input_format", "tsv",
+            "--url_col", "url",
+            "--caption_col", "caption",
             "--output_folder", images_dir,
             "--image_size", "256",
             "--processes_count", "16",
@@ -751,15 +752,27 @@ def setup_cc3m_with_img2dataset(output_dir: str) -> bool:
             "--resize_mode", "center_crop",
             "--output_format", "webdataset",
             "--enable_wandb", "False",
+            "--save_additional_columns", "[]",
         ]
 
         try:
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, check=False, capture_output=False, text=True)
-            if result.returncode == 0:
-                logger.info(f"✓ Successfully downloaded CC3M {split_name} images")
+            # Run without check so it doesn't fail on partial errors
+            result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+
+            # Log stderr for debugging
+            if result.stderr:
+                logger.info(f"img2dataset output: {result.stderr[:500]}")  # First 500 chars
+
+            # Check if output directory was created and has files
+            if os.path.exists(images_dir) and len([f for f in os.listdir(images_dir) if f.endswith('.tar')]) > 0:
+                tar_count = len([f for f in os.listdir(images_dir) if f.endswith('.tar')])
+                logger.info(f"✓ Successfully started downloading CC3M {split_name} images - {tar_count} shards created so far")
+            elif result.returncode == 0:
+                logger.info(f"✓ img2dataset completed for {split_name}")
             else:
-                logger.warning(f"⚠ img2dataset completed with some errors for {split_name} (this is normal for CC3M)")
+                logger.warning(f"⚠ img2dataset may have encountered errors for {split_name}. Check output directory.")
+                logger.warning(f"Return code: {result.returncode}")
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to run img2dataset for {split_name}: {e}")
             success = False
@@ -793,11 +806,32 @@ def setup_laion_with_img2dataset(output_dir: str) -> bool:
         logger.info("=" * 70)
         return False
 
-    parquet_files = [f for f in os.listdir(output_dir) if f.endswith('.parquet')]
+    # Check for parquet files or HF dataset directory
+    parquet_files = []
+    if os.path.exists(output_dir):
+        parquet_files = [f for f in os.listdir(output_dir) if f.endswith('.parquet')]
+
+        # Also check in subdirectories (HF datasets format)
+        for root, dirs, files in os.walk(output_dir):
+            for file in files:
+                if file.endswith('.parquet'):
+                    parquet_files.append(os.path.join(root, file))
 
     if not parquet_files:
-        logger.warning("No LAION parquet files found. Cannot proceed with image download.")
-        return False
+        # Check if we have a HF dataset directory
+        dataset_dir = os.path.join(output_dir, "dataset")
+        if os.path.exists(dataset_dir):
+            logger.info("Found HuggingFace dataset directory. Searching for parquet files...")
+            for root, dirs, files in os.walk(dataset_dir):
+                for file in files:
+                    if file.endswith('.parquet'):
+                        parquet_files.append(os.path.join(root, file))
+
+        if not parquet_files:
+            logger.warning("No LAION parquet files found. The dataset may need to be downloaded from HuggingFace first.")
+            logger.info("The dataset should have been downloaded using the HF datasets library.")
+            logger.info("If this failed, you may need to manually download the dataset or use a different LAION subset.")
+            return False
 
     logger.info("")
     logger.info("=" * 70)
@@ -814,9 +848,14 @@ def setup_laion_with_img2dataset(output_dir: str) -> bool:
 
     success = True
     for parquet_file in parquet_files:
-        parquet_path = os.path.join(output_dir, parquet_file)
+        # Handle both absolute and relative paths
+        if os.path.isabs(parquet_file):
+            parquet_path = parquet_file
+        else:
+            parquet_path = os.path.join(output_dir, parquet_file)
 
-        logger.info(f"Downloading LAION images from: {parquet_file}")
+        logger.info(f"Downloading LAION images from: {os.path.basename(parquet_path)}")
+        logger.info(f"Full path: {parquet_path}")
         logger.info(f"Output: {images_dir}")
         logger.info("Note: This may take several hours. Some URLs may be dead.")
 
@@ -825,6 +864,8 @@ def setup_laion_with_img2dataset(output_dir: str) -> bool:
             "img2dataset",
             "--url_list", parquet_path,
             "--input_format", "parquet",
+            "--url_col", "URL",  # Standard LAION column name
+            "--caption_col", "TEXT",  # Standard LAION column name
             "--output_folder", images_dir,
             "--image_size", "256",
             "--processes_count", "16",
@@ -836,16 +877,26 @@ def setup_laion_with_img2dataset(output_dir: str) -> bool:
 
         try:
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, check=False, capture_output=False, text=True)
-            if result.returncode == 0:
-                logger.info(f"✓ Successfully downloaded LAION images from {parquet_file}")
+            result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+
+            # Log stderr for debugging
+            if result.stderr:
+                logger.info(f"img2dataset output: {result.stderr[:500]}")  # First 500 chars
+
+            # Check if output directory was created and has files
+            if os.path.exists(images_dir) and len([f for f in os.listdir(images_dir) if f.endswith('.tar')]) > 0:
+                tar_count = len([f for f in os.listdir(images_dir) if f.endswith('.tar')])
+                logger.info(f"✓ Successfully started downloading LAION images - {tar_count} shards created so far")
+            elif result.returncode == 0:
+                logger.info(f"✓ img2dataset completed for LAION")
             else:
-                logger.warning(f"⚠ img2dataset completed with some errors (this is normal)")
+                logger.warning(f"⚠ img2dataset may have encountered errors. Check output directory.")
+                logger.warning(f"Return code: {result.returncode}")
         except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to run img2dataset for {parquet_file}: {e}")
+            logger.error(f"Failed to run img2dataset for {os.path.basename(parquet_path)}: {e}")
             success = False
         except Exception as e:
-            logger.error(f"Unexpected error running img2dataset for {parquet_file}: {e}")
+            logger.error(f"Unexpected error running img2dataset for {os.path.basename(parquet_path)}: {e}")
             success = False
 
     logger.info("=" * 70)
