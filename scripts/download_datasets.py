@@ -22,11 +22,21 @@ import subprocess
 import logging
 import zipfile
 import tarfile
+import json
 from urllib.parse import urlparse
 from typing import Dict, List, Tuple
 
 import requests
 from tqdm import tqdm
+
+# Try to import gdown for Google Drive downloads
+try:
+    import gdown
+    GDOWN_AVAILABLE = True
+except ImportError:
+    GDOWN_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("gdown not installed. Google Drive downloads will be skipped. Install with: pip install gdown")
 
 
 # Configure logging
@@ -60,15 +70,29 @@ DATASET_CONFIGS = {
         "size_estimate": "~25 GB",
     },
 
-    "sbu": {
-        "name": "SBU Captions",
+    "cc3m": {
+        "name": "Conceptual Captions 3M",
         "type": "image_text",
-        "description": "Image-caption pairs from Flickr",
+        "description": "Image-caption pairs from web",
         "urls": [
-            "https://www.cs.rice.edu/~vo9/sbucaptions/sbu-captions-all.tar.gz",
+            "https://storage.googleapis.com/gcc-data/Train/GCC-training.tsv",
+            "https://storage.googleapis.com/gcc-data/Validation/GCC-1.1.0-Validation.tsv",
         ],
-        "output_dir": "data/sbu",
-        "size_estimate": "~14 GB",
+        "output_dir": "data/cc3m",
+        "size_estimate": "TSV files ~500 MB, Images ~100-200 GB with img2dataset",
+        "post_download": "cc3m_setup",
+    },
+
+    "laion": {
+        "name": "LAION-COCO Subset",
+        "type": "image_text",
+        "description": "LAION subset filtered with COCO-style captions",
+        "urls": [
+            "https://huggingface.co/datasets/laion/laion-coco/resolve/main/part-00000-5b54c5d5-bbcf-484d-a2ce-0d6f73df1a36-c000.snappy.parquet",
+        ],
+        "output_dir": "data/laion",
+        "size_estimate": "Parquet ~600 MB, Images ~50 GB with img2dataset",
+        "post_download": "laion_setup",
     },
 
     # =========================================================================
@@ -126,6 +150,16 @@ DATASET_CONFIGS = {
         ],
         "output_dir": "data/gqa",
         "size_estimate": "~20 GB",
+    },
+
+    "ocrvqa": {
+        "name": "OCR-VQA",
+        "type": "vqa",
+        "description": "OCR-based Visual Question Answering dataset",
+        "gdrive_folder_id": "1_GYPY5UkUy7HIcR0zq3ZCFgeZN7BAfm_",
+        "output_dir": "data/ocrvqa",
+        "size_estimate": "~5 GB",
+        "post_download": "gdrive",
     },
 
     # =========================================================================
@@ -189,25 +223,11 @@ DATASET_CONFIGS = {
 # =============================================================================
 
 SPECIAL_ACCESS_DATASETS = {
-    "laion": {
-        "name": "LAION-400M Subset",
-        "reason": "Requires img2dataset tool and LAION metadata from HuggingFace",
-        "instructions": "pip install img2dataset; download metadata from https://huggingface.co/datasets/laion/laion400m",
-    },
-    "cc3m": {
-        "name": "Conceptual Captions 3M",
-        "reason": "Requires img2dataset tool to download images from TSV URLs",
-        "instructions": "pip install img2dataset; download TSV from https://ai.google.com/research/ConceptualCaptions",
-    },
     "flickr30k": {
         "name": "Flickr30k",
         "reason": "Requires Kaggle account and API credentials",
         "instructions": "Create Kaggle account, get API token, run: kaggle datasets download -d hsankesara/flickr-image-dataset",
-    },
-    "ocrvqa": {
-        "name": "OCR-VQA",
-        "reason": "Requires manual download from Google Drive",
-        "instructions": "Download from https://ocr-vqa.github.io/",
+        "note": "Kaggle authentication required - OPTIONAL, not required for training",
     },
 }
 
@@ -312,6 +332,133 @@ def extract_archive(archive_path: str, output_dir: str) -> Tuple[bool, str]:
         return False, error_msg
 
 
+def setup_cc3m_with_img2dataset(output_dir: str) -> bool:
+    """
+    Provide instructions for downloading CC3M images using img2dataset.
+
+    Args:
+        output_dir: CC3M data directory
+
+    Returns:
+        True if setup instructions displayed
+    """
+    tsv_files = []
+
+    # Check for TSV files
+    train_tsv = os.path.join(output_dir, "GCC-training.tsv")
+    val_tsv = os.path.join(output_dir, "GCC-1.1.0-Validation.tsv")
+
+    if os.path.exists(train_tsv):
+        tsv_files.append(("training", train_tsv))
+    if os.path.exists(val_tsv):
+        tsv_files.append(("validation", val_tsv))
+
+    if not tsv_files:
+        logger.warning("No CC3M TSV files found. Cannot proceed with image download.")
+        return False
+
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("CC3M TSV FILES DOWNLOADED - NEXT STEPS")
+    logger.info("=" * 70)
+    logger.info("")
+    logger.info("To download the actual images, you need to use img2dataset.")
+    logger.info("Run the following commands on your remote computer:")
+    logger.info("")
+
+    for split_name, tsv_path in tsv_files:
+        images_dir = os.path.join(output_dir, f"images_{split_name}")
+        logger.info(f"# Download {split_name} images:")
+        logger.info(f"img2dataset --url_list {tsv_path} \\")
+        logger.info(f"    --output_folder {images_dir} \\")
+        logger.info(f"    --image_size 256 \\")
+        logger.info(f"    --processes_count 16 \\")
+        logger.info(f"    --thread_count 64 \\")
+        logger.info(f"    --resize_mode center_crop \\")
+        logger.info(f"    --output_format webdataset")
+        logger.info("")
+
+    logger.info("Note: CC3M has many dead URLs. Expect ~70-80% success rate.")
+    logger.info("=" * 70)
+
+    return True
+
+
+def setup_laion_with_img2dataset(output_dir: str) -> bool:
+    """
+    Provide instructions for downloading LAION images using img2dataset.
+
+    Args:
+        output_dir: LAION data directory
+
+    Returns:
+        True if setup instructions displayed
+    """
+    parquet_files = [f for f in os.listdir(output_dir) if f.endswith('.parquet')]
+
+    if not parquet_files:
+        logger.warning("No LAION parquet files found. Cannot proceed with image download.")
+        return False
+
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("LAION PARQUET FILES DOWNLOADED - NEXT STEPS")
+    logger.info("=" * 70)
+    logger.info("")
+    logger.info("To download the actual images, you need to use img2dataset.")
+    logger.info("Run the following commands on your remote computer:")
+    logger.info("")
+
+    for parquet_file in parquet_files:
+        parquet_path = os.path.join(output_dir, parquet_file)
+        images_dir = os.path.join(output_dir, "images")
+        logger.info(f"# Download LAION images from {parquet_file}:")
+        logger.info(f"img2dataset --url_list {parquet_path} \\")
+        logger.info(f"    --input_format parquet \\")
+        logger.info(f"    --output_folder {images_dir} \\")
+        logger.info(f"    --image_size 256 \\")
+        logger.info(f"    --processes_count 16 \\")
+        logger.info(f"    --thread_count 64 \\")
+        logger.info(f"    --resize_mode center_crop \\")
+        logger.info(f"    --output_format webdataset")
+        logger.info("")
+
+    logger.info("=" * 70)
+
+    return True
+
+
+def download_gdrive_folder(folder_id: str, output_dir: str) -> Tuple[bool, str]:
+    """
+    Download files from Google Drive folder using gdown.
+
+    Args:
+        folder_id: Google Drive folder ID
+        output_dir: Local output directory
+
+    Returns:
+        Tuple of (success: bool, error_message: str)
+    """
+    if not GDOWN_AVAILABLE:
+        return False, "gdown not installed. Install with: pip install gdown"
+
+    try:
+        logger.info(f"Downloading Google Drive folder: {folder_id}")
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Download entire folder
+        url = f"https://drive.google.com/drive/folders/{folder_id}"
+        gdown.download_folder(url, output=output_dir, quiet=False, use_cookies=False)
+
+        logger.info(f"Successfully downloaded Google Drive folder to: {output_dir}")
+        return True, ""
+
+    except Exception as e:
+        error_msg = f"Failed to download Google Drive folder: {str(e)}"
+        logger.error(error_msg)
+        return False, error_msg
+
+
 def download_dataset(dataset_name: str, data_root: str = "data") -> Dict:
     """
     Download a specific dataset. Attempts all URLs without early exit.
@@ -386,8 +533,39 @@ def download_dataset(dataset_name: str, data_root: str = "data") -> Dict:
 
         results["urls"].append(url_result)
 
+    # Handle Google Drive downloads if specified
+    if config.get("gdrive_folder_id"):
+        logger.info("Attempting Google Drive download...")
+        gdrive_success, gdrive_error = download_gdrive_folder(
+            config["gdrive_folder_id"],
+            output_dir
+        )
+        if gdrive_success:
+            results["downloaded"] += 1
+            results["urls"].append({
+                "url": f"Google Drive folder {config['gdrive_folder_id']}",
+                "filename": "folder",
+                "status": "downloaded",
+                "error": None,
+            })
+        else:
+            results["failed"] += 1
+            results["urls"].append({
+                "url": f"Google Drive folder {config['gdrive_folder_id']}",
+                "filename": "folder",
+                "status": "failed",
+                "error": gdrive_error,
+            })
+
+    # Run post-download setup if specified
+    post_download_action = config.get("post_download")
+    if post_download_action == "cc3m_setup":
+        setup_cc3m_with_img2dataset(output_dir)
+    elif post_download_action == "laion_setup":
+        setup_laion_with_img2dataset(output_dir)
+
     # Summary for this dataset
-    total = len(config.get("urls", []))
+    total = len(config.get("urls", [])) + (1 if config.get("gdrive_folder_id") else 0)
     logger.info(f"Completed {config['name']}: {results['downloaded']}/{total} downloaded, "
                 f"{results['failed']} failed, {results['skipped']} skipped")
 
