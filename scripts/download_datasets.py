@@ -23,8 +23,11 @@ import logging
 import zipfile
 import tarfile
 import json
+import time
+from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import requests
 from tqdm import tqdm
@@ -38,6 +41,15 @@ except ImportError:
     logger = logging.getLogger(__name__)
     logger.warning("gdown not installed. Google Drive downloads will be skipped. Install with: pip install gdown")
 
+# Try to import wandb for logging
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("wandb not installed. Remote logging will be skipped. Install with: pip install wandb")
+
 
 # Configure logging
 logging.basicConfig(
@@ -46,6 +58,10 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+# Wandb configuration
+WANDB_PROJECT = "MicroVLM-E-datasets-logs"
+RUN_COUNTER_FILE = ".dataset_download_counter"
 
 
 # =============================================================================
@@ -230,6 +246,125 @@ SPECIAL_ACCESS_DATASETS = {
         "note": "Kaggle authentication required - OPTIONAL, not required for training",
     },
 }
+
+
+# =============================================================================
+# RUN COUNTER AND WANDB FUNCTIONS
+# =============================================================================
+
+def get_and_increment_run_counter(counter_file: str = RUN_COUNTER_FILE) -> int:
+    """
+    Read the current run counter, increment it, and save.
+
+    Args:
+        counter_file: Path to the counter file
+
+    Returns:
+        Current run number (before increment)
+    """
+    counter_path = Path(counter_file)
+
+    # Read current counter or start at 1
+    if counter_path.exists():
+        try:
+            with open(counter_path, 'r') as f:
+                current_count = int(f.read().strip())
+        except (ValueError, FileNotFoundError):
+            current_count = 0
+    else:
+        current_count = 0
+
+    # Increment counter
+    new_count = current_count + 1
+
+    # Save new counter
+    with open(counter_path, 'w') as f:
+        f.write(str(new_count))
+
+    logger.info(f"Run counter: {new_count}")
+    return new_count
+
+
+def initialize_wandb(run_number: int, args: argparse.Namespace) -> Optional[object]:
+    """
+    Initialize Weights & Biases logging.
+
+    Args:
+        run_number: Current run number
+        args: Command line arguments
+
+    Returns:
+        wandb run object or None if unavailable
+    """
+    if not WANDB_AVAILABLE:
+        logger.warning("wandb not available. Skipping remote logging.")
+        return None
+
+    try:
+        # Generate run name with counter
+        run_name = f"microvlme-datasets-{run_number}log"
+
+        # Initialize wandb
+        run = wandb.init(
+            project=WANDB_PROJECT,
+            name=run_name,
+            config={
+                "run_number": run_number,
+                "data_root": args.data_root,
+                "download_all": args.all,
+                "specific_datasets": args.datasets if hasattr(args, 'datasets') else None,
+                "timestamp": datetime.now().isoformat(),
+            },
+            tags=["dataset_download", f"run_{run_number}"],
+            notes=f"Dataset download run #{run_number}",
+        )
+
+        logger.info(f"Initialized wandb logging: {run_name}")
+        logger.info(f"View logs at: {run.get_url()}")
+
+        return run
+
+    except Exception as e:
+        logger.error(f"Failed to initialize wandb: {e}")
+        return None
+
+
+def log_to_wandb(run: Optional[object], metrics: Dict, step: Optional[int] = None):
+    """
+    Log metrics to wandb.
+
+    Args:
+        run: wandb run object
+        metrics: Dictionary of metrics to log
+        step: Optional step number
+    """
+    if run is None or not WANDB_AVAILABLE:
+        return
+
+    try:
+        if step is not None:
+            wandb.log(metrics, step=step)
+        else:
+            wandb.log(metrics)
+    except Exception as e:
+        logger.error(f"Failed to log to wandb: {e}")
+
+
+def finalize_wandb(run: Optional[object]):
+    """
+    Finalize and close wandb run.
+
+    Args:
+        run: wandb run object
+    """
+    if run is None or not WANDB_AVAILABLE:
+        return
+
+    try:
+        wandb.finish()
+        logger.info("Closed wandb logging session")
+    except Exception as e:
+        logger.error(f"Failed to finalize wandb: {e}")
 
 
 # =============================================================================
@@ -459,9 +594,14 @@ def download_gdrive_folder(folder_id: str, output_dir: str) -> Tuple[bool, str]:
         return False, error_msg
 
 
-def download_dataset(dataset_name: str, data_root: str = "data") -> Dict:
+def download_dataset(dataset_name: str, data_root: str = "data", wandb_run: Optional[object] = None) -> Dict:
     """
     Download a specific dataset. Attempts all URLs without early exit.
+
+    Args:
+        dataset_name: Name of dataset to download
+        data_root: Root directory for data
+        wandb_run: Optional wandb run object for logging
 
     Returns:
         Dictionary with download results for each URL
@@ -569,12 +709,27 @@ def download_dataset(dataset_name: str, data_root: str = "data") -> Dict:
     logger.info(f"Completed {config['name']}: {results['downloaded']}/{total} downloaded, "
                 f"{results['failed']} failed, {results['skipped']} skipped")
 
+    # Log to wandb
+    if wandb_run is not None:
+        success_rate = (results['downloaded'] / (results['downloaded'] + results['failed']) * 100) if (results['downloaded'] + results['failed']) > 0 else 0
+        log_to_wandb(wandb_run, {
+            f"dataset/{dataset_name}/downloaded": results['downloaded'],
+            f"dataset/{dataset_name}/failed": results['failed'],
+            f"dataset/{dataset_name}/skipped": results['skipped'],
+            f"dataset/{dataset_name}/total": total,
+            f"dataset/{dataset_name}/success_rate": success_rate,
+        })
+
     return results
 
 
-def download_all_datasets(data_root: str = "data") -> Dict:
+def download_all_datasets(data_root: str = "data", wandb_run: Optional[object] = None) -> Dict:
     """
     Download ALL datasets. No early exit, attempts everything.
+
+    Args:
+        data_root: Root directory for data
+        wandb_run: Optional wandb run object for logging
 
     Returns:
         Complete results dictionary
@@ -586,6 +741,7 @@ def download_all_datasets(data_root: str = "data") -> Dict:
         "total_files_downloaded": 0,
         "total_files_failed": 0,
         "total_files_skipped": 0,
+        "start_time": time.time(),
     }
 
     logger.info("")
@@ -617,70 +773,275 @@ def download_all_datasets(data_root: str = "data") -> Dict:
     logger.info("=" * 70)
 
     # Download all available datasets
-    for dataset_name in DATASET_CONFIGS:
-        result = download_dataset(dataset_name, data_root)
+    for idx, dataset_name in enumerate(DATASET_CONFIGS):
+        result = download_dataset(dataset_name, data_root, wandb_run)
 
         all_results["total_files_downloaded"] += result.get("downloaded", 0)
         all_results["total_files_failed"] += result.get("failed", 0)
         all_results["total_files_skipped"] += result.get("skipped", 0)
 
+        # Store all results (even successful ones) for detailed reporting
         if result.get("failed", 0) == 0 and result.get("downloaded", 0) > 0:
             all_results["downloaded_datasets"].append(dataset_name)
+            all_results["failed_datasets"].append({
+                "dataset": dataset_name,
+                "result": result,
+            })
         elif result.get("failed", 0) > 0:
             all_results["failed_datasets"].append({
                 "dataset": dataset_name,
                 "result": result,
             })
+        elif result.get("skipped", 0) > 0:
+            # Also track datasets that were entirely skipped (already existed)
+            all_results["failed_datasets"].append({
+                "dataset": dataset_name,
+                "result": result,
+            })
+
+        # Log progress to wandb
+        if wandb_run is not None:
+            progress_pct = ((idx + 1) / len(DATASET_CONFIGS)) * 100
+            log_to_wandb(wandb_run, {
+                "progress/datasets_processed": idx + 1,
+                "progress/total_datasets": len(DATASET_CONFIGS),
+                "progress/percentage": progress_pct,
+            })
+
+    # Calculate final statistics
+    all_results["end_time"] = time.time()
+    all_results["duration_seconds"] = all_results["end_time"] - all_results["start_time"]
+
+    # Log final summary to wandb
+    if wandb_run is not None:
+        total_attempted = (all_results['total_files_downloaded'] +
+                          all_results['total_files_failed'] +
+                          all_results['total_files_skipped'])
+        overall_success_rate = (all_results['total_files_downloaded'] /
+                               (all_results['total_files_downloaded'] + all_results['total_files_failed']) * 100) if (all_results['total_files_downloaded'] + all_results['total_files_failed']) > 0 else 0
+
+        fully_downloaded = len([ds for ds, info in
+                               {ds: info for item in all_results.get("failed_datasets", [])
+                                for ds, info in [(item["dataset"], item["result"])]}.items()
+                               if info.get("failed", 0) == 0 and info.get("downloaded", 0) > 0])
+
+        partially_downloaded = len([ds for ds, info in
+                                   {ds: info for item in all_results.get("failed_datasets", [])
+                                    for ds, info in [(item["dataset"], item["result"])]}.items()
+                                   if info.get("downloaded", 0) > 0 and info.get("failed", 0) > 0])
+
+        failed_datasets = len([ds for ds, info in
+                              {ds: info for item in all_results.get("failed_datasets", [])
+                               for ds, info in [(item["dataset"], item["result"])]}.items()
+                              if info.get("downloaded", 0) == 0 and info.get("failed", 0) > 0])
+
+        final_metrics = {
+            "summary/total_files_downloaded": all_results['total_files_downloaded'],
+            "summary/total_files_failed": all_results['total_files_failed'],
+            "summary/total_files_skipped": all_results['total_files_skipped'],
+            "summary/total_files_attempted": total_attempted,
+            "summary/overall_success_rate": overall_success_rate,
+            "summary/duration_seconds": all_results['duration_seconds'],
+            "summary/duration_minutes": all_results['duration_seconds'] / 60,
+            "summary/fully_downloaded_datasets": fully_downloaded,
+            "summary/partially_downloaded_datasets": partially_downloaded,
+            "summary/failed_datasets": failed_datasets,
+            "summary/skipped_special_access": len(all_results['skipped_special_access']),
+            "summary/timestamp": datetime.now().isoformat(),
+        }
+
+        log_to_wandb(wandb_run, final_metrics)
+
+        # Create summary table for wandb
+        try:
+            dataset_table_data = []
+            for item in all_results.get("failed_datasets", []):
+                ds_name = item["dataset"]
+                ds_result = item["result"]
+                config = DATASET_CONFIGS.get(ds_name, {})
+
+                total_files = (ds_result.get("downloaded", 0) +
+                              ds_result.get("failed", 0) +
+                              ds_result.get("skipped", 0))
+                success_rate = (ds_result.get("downloaded", 0) /
+                               (ds_result.get("downloaded", 0) + ds_result.get("failed", 0)) * 100) if (ds_result.get("downloaded", 0) + ds_result.get("failed", 0)) > 0 else 0
+
+                status = "✓ Full" if ds_result.get("failed", 0) == 0 and ds_result.get("downloaded", 0) > 0 else \
+                        "⚠ Partial" if ds_result.get("downloaded", 0) > 0 and ds_result.get("failed", 0) > 0 else \
+                        "✗ Failed" if ds_result.get("failed", 0) > 0 else "⊘ Skipped"
+
+                dataset_table_data.append([
+                    config.get("name", ds_name),
+                    status,
+                    ds_result.get("downloaded", 0),
+                    ds_result.get("failed", 0),
+                    ds_result.get("skipped", 0),
+                    total_files,
+                    f"{success_rate:.1f}%",
+                    config.get("size_estimate", "Unknown")
+                ])
+
+            table = wandb.Table(
+                columns=["Dataset", "Status", "Downloaded", "Failed", "Skipped", "Total", "Success Rate", "Est. Size"],
+                data=dataset_table_data
+            )
+            wandb.log({"dataset_summary_table": table})
+
+        except Exception as e:
+            logger.warning(f"Failed to create wandb summary table: {e}")
 
     return all_results
 
 
 def print_final_summary(results: Dict):
-    """Print comprehensive final summary."""
+    """Print comprehensive final summary with detailed statistics."""
     print("")
-    print("#" * 70)
-    print("# DOWNLOAD COMPLETE - FINAL SUMMARY")
-    print("#" * 70)
+    print("#" * 80)
+    print("# DOWNLOAD COMPLETE - COMPREHENSIVE SUMMARY")
+    print("#" * 80)
 
     print("")
-    print("FILES:")
-    print(f"  Downloaded: {results['total_files_downloaded']}")
-    print(f"  Failed:     {results['total_files_failed']}")
-    print(f"  Skipped:    {results['total_files_skipped']} (already existed)")
+    print("=" * 80)
+    print("OVERALL STATISTICS")
+    print("=" * 80)
+    print(f"  Total Files/Resources Downloaded: {results['total_files_downloaded']}")
+    print(f"  Total Failed:                     {results['total_files_failed']}")
+    print(f"  Total Skipped (already existed):  {results['total_files_skipped']}")
+    print("")
+    total_attempted = (results['total_files_downloaded'] +
+                       results['total_files_failed'] +
+                       results['total_files_skipped'])
+    if total_attempted > 0:
+        success_rate = (results['total_files_downloaded'] /
+                       (results['total_files_downloaded'] + results['total_files_failed'])) * 100 if (results['total_files_downloaded'] + results['total_files_failed']) > 0 else 0
+        print(f"  Success Rate: {success_rate:.1f}%")
 
     print("")
-    print("SUCCESSFULLY DOWNLOADED DATASETS:")
-    if results["downloaded_datasets"]:
-        for ds in results["downloaded_datasets"]:
-            config = DATASET_CONFIGS.get(ds, {})
-            print(f"  ✓ {config.get('name', ds)}")
-    else:
-        print("  (none)")
+    print("=" * 80)
+    print("DETAILED DATASET STATUS")
+    print("=" * 80)
+
+    # Store all dataset results for detailed display
+    all_dataset_results = {}
+
+    # Collect results from downloaded datasets
+    for ds in results.get("downloaded_datasets", []):
+        all_dataset_results[ds] = {"status": "success", "details": None}
+
+    # Collect results from failed datasets
+    for item in results.get("failed_datasets", []):
+        all_dataset_results[item["dataset"]] = {
+            "status": "partial_or_failed",
+            "details": item["result"]
+        }
+
+    # Print each dataset with detailed statistics
+    for ds_name in DATASET_CONFIGS.keys():
+        config = DATASET_CONFIGS[ds_name]
+        print("")
+        print(f"┌{'─' * 78}┐")
+        print(f"│ {config['name']:<76} │")
+        print(f"└{'─' * 78}┘")
+
+        if ds_name in all_dataset_results:
+            result_info = all_dataset_results[ds_name]
+
+            if result_info["status"] == "success":
+                print(f"  Status: ✓ FULLY DOWNLOADED")
+                print(f"  Output: {config['output_dir']}")
+                print(f"  Estimated Size: {config.get('size_estimate', 'Unknown')}")
+            else:
+                # Show detailed breakdown for partial/failed downloads
+                details = result_info["details"]
+                downloaded = details.get("downloaded", 0)
+                failed = details.get("failed", 0)
+                skipped = details.get("skipped", 0)
+                total = downloaded + failed + skipped
+
+                if downloaded > 0 and failed > 0:
+                    print(f"  Status: ⚠ PARTIALLY DOWNLOADED")
+                elif downloaded > 0 and failed == 0:
+                    print(f"  Status: ✓ FULLY DOWNLOADED")
+                elif failed > 0 and downloaded == 0:
+                    print(f"  Status: ✗ DOWNLOAD FAILED")
+                else:
+                    print(f"  Status: ⊘ SKIPPED (already existed)")
+
+                print(f"  Output: {config['output_dir']}")
+                print(f"  Statistics:")
+                print(f"    - Downloaded:  {downloaded}/{total} files")
+                print(f"    - Failed:      {failed}/{total} files")
+                print(f"    - Skipped:     {skipped}/{total} files (already existed)")
+
+                if failed > 0:
+                    success_rate = (downloaded / (downloaded + failed)) * 100 if (downloaded + failed) > 0 else 0
+                    print(f"    - Success Rate: {success_rate:.1f}%")
+
+                # Show specific failures
+                if failed > 0:
+                    print(f"  Failed URLs:")
+                    for url_info in details.get("urls", []):
+                        if url_info["status"] == "failed":
+                            print(f"    ✗ {url_info['filename']}")
+                            print(f"      Error: {url_info['error']}")
+
+                # Show specific downloads
+                if downloaded > 0:
+                    print(f"  Successfully Downloaded:")
+                    for url_info in details.get("urls", []):
+                        if url_info["status"] == "downloaded":
+                            print(f"    ✓ {url_info['filename']}")
+        else:
+            print(f"  Status: ⊘ NOT ATTEMPTED")
+            print(f"  Output: {config['output_dir']}")
 
     print("")
-    print("FAILED DATASETS:")
-    if results["failed_datasets"]:
-        for item in results["failed_datasets"]:
-            ds = item["dataset"]
-            config = DATASET_CONFIGS.get(ds, {})
-            print(f"  ✗ {config.get('name', ds)}")
-            for url_info in item["result"].get("urls", []):
-                if url_info["status"] == "failed":
-                    print(f"      - {url_info['filename']}: {url_info['error']}")
-    else:
-        print("  (none)")
-
-    print("")
-    print("SKIPPED (REQUIRE SPECIAL ACCESS):")
+    print("=" * 80)
+    print("DATASETS REQUIRING SPECIAL ACCESS (SKIPPED)")
+    print("=" * 80)
     if results["skipped_special_access"]:
         for item in results["skipped_special_access"]:
             print(f"  ⊘ {item['name']}")
             print(f"      Reason: {item['reason']}")
+            print(f"      Instructions: {item['instructions']}")
+            print("")
     else:
         print("  (none)")
 
     print("")
-    print("#" * 70)
+    print("=" * 80)
+    print("SUMMARY BY STATUS")
+    print("=" * 80)
+
+    fully_downloaded = len([ds for ds, info in all_dataset_results.items()
+                           if info["status"] == "success" or
+                           (info["details"] and info["details"].get("failed", 0) == 0 and
+                            info["details"].get("downloaded", 0) > 0)])
+
+    partially_downloaded = len([ds for ds, info in all_dataset_results.items()
+                               if info["status"] == "partial_or_failed" and
+                               info["details"] and
+                               info["details"].get("downloaded", 0) > 0 and
+                               info["details"].get("failed", 0) > 0])
+
+    failed = len([ds for ds, info in all_dataset_results.items()
+                 if info["status"] == "partial_or_failed" and
+                 info["details"] and
+                 info["details"].get("downloaded", 0) == 0 and
+                 info["details"].get("failed", 0) > 0])
+
+    print(f"  ✓ Fully Downloaded:      {fully_downloaded} datasets")
+    print(f"  ⚠ Partially Downloaded:  {partially_downloaded} datasets")
+    print(f"  ✗ Failed:                {failed} datasets")
+    print(f"  ⊘ Not Attempted:         {len(DATASET_CONFIGS) - len(all_dataset_results)} datasets")
+    print(f"  ⊘ Requires Manual Access: {len(results['skipped_special_access'])} datasets")
+
+    print("")
+    print("#" * 80)
+    print("# NOTE: Some datasets (CC3M, LAION) may have dead URLs - this is NORMAL")
+    print("# The script continues downloading valid URLs even when some fail")
+    print("#" * 80)
+    print("")
 
 
 def print_status(data_root: str = "data"):
@@ -798,6 +1159,11 @@ Examples:
         action="store_true",
         help="Create/update dataset configuration file"
     )
+    parser.add_argument(
+        "--no-wandb",
+        action="store_true",
+        help="Disable Weights & Biases logging"
+    )
 
     return parser.parse_args()
 
@@ -816,57 +1182,90 @@ def main():
         create_dataset_config(args.data_root)
         return
 
-    if args.all:
-        # Download everything possible
-        results = download_all_datasets(args.data_root)
-        print_final_summary(results)
+    # Initialize wandb for download tracking (unless disabled)
+    wandb_run = None
+    if (args.all or args.datasets) and not args.no_wandb:
+        run_number = get_and_increment_run_counter()
+        wandb_run = initialize_wandb(run_number, args)
+    elif args.no_wandb:
+        logger.info("Weights & Biases logging disabled by --no-wandb flag")
 
-    elif args.datasets:
-        # Download specified datasets
-        results = {
-            "downloaded_datasets": [],
-            "failed_datasets": [],
-            "skipped_special_access": [],
-            "total_files_downloaded": 0,
-            "total_files_failed": 0,
-            "total_files_skipped": 0,
-        }
+    try:
+        if args.all:
+            # Download everything possible
+            results = download_all_datasets(args.data_root, wandb_run)
+            print_final_summary(results)
 
-        for dataset_name in args.datasets:
-            if dataset_name in SPECIAL_ACCESS_DATASETS:
-                info = SPECIAL_ACCESS_DATASETS[dataset_name]
-                logger.warning(f"SKIPPED: {info['name']} - {info['reason']}")
-                results["skipped_special_access"].append({
-                    "dataset": dataset_name,
-                    "name": info["name"],
-                    "reason": info["reason"],
-                    "instructions": info["instructions"],
+        elif args.datasets:
+            # Download specified datasets
+            results = {
+                "downloaded_datasets": [],
+                "failed_datasets": [],
+                "skipped_special_access": [],
+                "total_files_downloaded": 0,
+                "total_files_failed": 0,
+                "total_files_skipped": 0,
+                "start_time": time.time(),
+            }
+
+            for dataset_name in args.datasets:
+                if dataset_name in SPECIAL_ACCESS_DATASETS:
+                    info = SPECIAL_ACCESS_DATASETS[dataset_name]
+                    logger.warning(f"SKIPPED: {info['name']} - {info['reason']}")
+                    results["skipped_special_access"].append({
+                        "dataset": dataset_name,
+                        "name": info["name"],
+                        "reason": info["reason"],
+                        "instructions": info["instructions"],
+                    })
+                    continue
+
+                result = download_dataset(dataset_name, args.data_root, wandb_run)
+                results["total_files_downloaded"] += result.get("downloaded", 0)
+                results["total_files_failed"] += result.get("failed", 0)
+                results["total_files_skipped"] += result.get("skipped", 0)
+
+                if result.get("failed", 0) == 0:
+                    results["downloaded_datasets"].append(dataset_name)
+                else:
+                    results["failed_datasets"].append({
+                        "dataset": dataset_name,
+                        "result": result,
+                    })
+
+            # Calculate final metrics for specific datasets
+            results["end_time"] = time.time()
+            results["duration_seconds"] = results["end_time"] - results["start_time"]
+
+            # Log final summary for specific datasets
+            if wandb_run is not None:
+                overall_success_rate = (results['total_files_downloaded'] /
+                                       (results['total_files_downloaded'] + results['total_files_failed']) * 100) if (results['total_files_downloaded'] + results['total_files_failed']) > 0 else 0
+
+                log_to_wandb(wandb_run, {
+                    "summary/total_files_downloaded": results['total_files_downloaded'],
+                    "summary/total_files_failed": results['total_files_failed'],
+                    "summary/total_files_skipped": results['total_files_skipped'],
+                    "summary/overall_success_rate": overall_success_rate,
+                    "summary/duration_seconds": results['duration_seconds'],
+                    "summary/datasets_requested": len(args.datasets),
                 })
-                continue
 
-            result = download_dataset(dataset_name, args.data_root)
-            results["total_files_downloaded"] += result.get("downloaded", 0)
-            results["total_files_failed"] += result.get("failed", 0)
-            results["total_files_skipped"] += result.get("skipped", 0)
+            print_final_summary(results)
 
-            if result.get("failed", 0) == 0:
-                results["downloaded_datasets"].append(dataset_name)
-            else:
-                results["failed_datasets"].append({
-                    "dataset": dataset_name,
-                    "result": result,
-                })
+        else:
+            print("No action specified. Use --all, --datasets, or --status")
+            print("Run with --help for more information")
+            print_status(args.data_root)
 
-        print_final_summary(results)
+        # Always create/update config after downloads
+        if args.all or args.datasets:
+            create_dataset_config(args.data_root)
 
-    else:
-        print("No action specified. Use --all, --datasets, or --status")
-        print("Run with --help for more information")
-        print_status(args.data_root)
-
-    # Always create/update config after downloads
-    if args.all or args.datasets:
-        create_dataset_config(args.data_root)
+    finally:
+        # Finalize wandb logging
+        if wandb_run is not None:
+            finalize_wandb(wandb_run)
 
 
 if __name__ == "__main__":

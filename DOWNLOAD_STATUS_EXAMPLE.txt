@@ -1,0 +1,274 @@
+═══════════════════════════════════════════════════════════════════════════
+                    EXAMPLE: DOWNLOAD STATUS OUTPUT
+═══════════════════════════════════════════════════════════════════════════
+
+This shows what you'll see at the end of the download process, including
+detailed statistics for each dataset showing valid and invalid URLs.
+
+
+═══════════════════════════════════════════════════════════════════════════
+                        EXAMPLE OUTPUT FORMAT
+═══════════════════════════════════════════════════════════════════════════
+
+################################################################################
+# DOWNLOAD COMPLETE - COMPREHENSIVE SUMMARY
+################################################################################
+
+================================================================================
+OVERALL STATISTICS
+================================================================================
+  Total Files/Resources Downloaded: 45
+  Total Failed:                     12
+  Total Skipped (already existed):  3
+
+  Success Rate: 78.9%
+
+================================================================================
+DETAILED DATASET STATUS
+================================================================================
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ COCO 2017                                                                │
+└──────────────────────────────────────────────────────────────────────────┘
+  Status: ✓ FULLY DOWNLOADED
+  Output: data/coco
+  Estimated Size: ~25 GB
+  Statistics:
+    - Downloaded:  3/3 files
+    - Failed:      0/3 files
+    - Skipped:     0/3 files (already existed)
+    - Success Rate: 100.0%
+  Successfully Downloaded:
+    ✓ train2017.zip
+    ✓ val2017.zip
+    ✓ annotations_trainval2017.zip
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Conceptual Captions 3M                                                   │
+└──────────────────────────────────────────────────────────────────────────┘
+  Status: ✓ FULLY DOWNLOADED
+  Output: data/cc3m
+  Estimated Size: TSV files ~500 MB, Images ~100-200 GB with img2dataset
+  Statistics:
+    - Downloaded:  2/2 files
+    - Failed:      0/2 files
+    - Skipped:     0/2 files (already existed)
+    - Success Rate: 100.0%
+  Successfully Downloaded:
+    ✓ GCC-training.tsv
+    ✓ GCC-1.1.0-Validation.tsv
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ LAION-COCO Subset                                                        │
+└──────────────────────────────────────────────────────────────────────────┘
+  Status: ✓ FULLY DOWNLOADED
+  Output: data/laion
+  Estimated Size: Parquet ~600 MB, Images ~50 GB with img2dataset
+  Statistics:
+    - Downloaded:  1/1 files
+    - Failed:      0/1 files
+    - Skipped:     0/1 files (already existed)
+    - Success Rate: 100.0%
+  Successfully Downloaded:
+    ✓ part-00000-5b54c5d5-bbcf-484d-a2ce-0d6f73df1a36-c000.snappy.parquet
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ VQA v2                                                                   │
+└──────────────────────────────────────────────────────────────────────────┘
+  Status: ✓ FULLY DOWNLOADED
+  Output: data/vqa
+  Statistics:
+    - Downloaded:  4/4 files
+    - Failed:      0/4 files
+    - Skipped:     0/4 files (already existed)
+    - Success Rate: 100.0%
+  Successfully Downloaded:
+    ✓ v2_Questions_Train_mscoco.zip
+    ✓ v2_Questions_Val_mscoco.zip
+    ✓ v2_Annotations_Train_mscoco.zip
+    ✓ v2_Annotations_Val_mscoco.zip
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ OK-VQA                                                                   │
+└──────────────────────────────────────────────────────────────────────────┘
+  Status: ⚠ PARTIALLY DOWNLOADED
+  Output: data/okvqa
+  Statistics:
+    - Downloaded:  3/4 files
+    - Failed:      1/4 files
+    - Skipped:     0/4 files (already existed)
+    - Success Rate: 75.0%
+  Failed URLs:
+    ✗ mscoco_val2014_annotations.json.zip
+      Error: HTTP Error 404: Not Found
+  Successfully Downloaded:
+    ✓ OpenEnded_mscoco_train2014_questions.json.zip
+    ✓ OpenEnded_mscoco_val2014_questions.json.zip
+    ✓ mscoco_train2014_annotations.json.zip
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ OCR-VQA                                                                  │
+└──────────────────────────────────────────────────────────────────────────┘
+  Status: ✓ FULLY DOWNLOADED
+  Output: data/ocrvqa
+  Estimated Size: ~5 GB
+  Statistics:
+    - Downloaded:  1/1 files
+    - Failed:      0/1 files
+    - Skipped:     0/1 files (already existed)
+  Successfully Downloaded:
+    ✓ folder (Google Drive)
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ GQA                                                                      │
+└──────────────────────────────────────────────────────────────────────────┘
+  Status: ✓ FULLY DOWNLOADED
+  Output: data/gqa
+  Statistics:
+    - Downloaded:  2/2 files
+    - Failed:      0/2 files
+    - Skipped:     0/2 files (already existed)
+    - Success Rate: 100.0%
+  Successfully Downloaded:
+    ✓ questions1.2.zip
+    ✓ images.zip
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ RefCOCO                                                                  │
+└──────────────────────────────────────────────────────────────────────────┘
+  Status: ⊘ SKIPPED (already existed)
+  Output: data/refcoco
+  Statistics:
+    - Downloaded:  0/1 files
+    - Failed:      0/1 files
+    - Skipped:     1/1 files (already existed)
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ LLaVA Instruction Tuning                                                 │
+└──────────────────────────────────────────────────────────────────────────┘
+  Status: ✓ FULLY DOWNLOADED
+  Output: data/llava
+  Statistics:
+    - Downloaded:  1/1 files
+    - Failed:      0/1 files
+    - Skipped:     0/1 files (already existed)
+    - Success Rate: 100.0%
+  Successfully Downloaded:
+    ✓ llava_instruct_150k.json
+
+================================================================================
+DATASETS REQUIRING SPECIAL ACCESS (SKIPPED)
+================================================================================
+  ⊘ Flickr30k
+      Reason: Requires Kaggle account and API credentials
+      Instructions: Create Kaggle account, get API token, run: kaggle datasets download -d hsankesara/flickr-image-dataset
+
+================================================================================
+SUMMARY BY STATUS
+================================================================================
+  ✓ Fully Downloaded:      9 datasets
+  ⚠ Partially Downloaded:  1 datasets
+  ✗ Failed:                0 datasets
+  ⊘ Not Attempted:         0 datasets
+  ⊘ Requires Manual Access: 1 datasets
+
+################################################################################
+# NOTE: Some datasets (CC3M, LAION) may have dead URLs - this is NORMAL
+# The script continues downloading valid URLs even when some fail
+################################################################################
+
+
+═══════════════════════════════════════════════════════════════════════════
+                        WHAT THE STATUS SHOWS
+═══════════════════════════════════════════════════════════════════════════
+
+FOR EACH DATASET, YOU'LL SEE:
+
+1. STATUS:
+   ✓ FULLY DOWNLOADED      - All files downloaded successfully
+   ⚠ PARTIALLY DOWNLOADED  - Some files downloaded, some failed
+   ✗ DOWNLOAD FAILED       - No files could be downloaded
+   ⊘ SKIPPED               - Already existed or not attempted
+
+2. STATISTICS:
+   - Downloaded: X/Y files  - How many files successfully downloaded
+   - Failed: X/Y files      - How many URLs were invalid/dead
+   - Skipped: X/Y files     - How many already existed
+   - Success Rate: XX%      - Percentage of valid URLs
+
+3. DETAILED FILE LIST:
+   ✓ Successfully Downloaded: Lists each valid file
+   ✗ Failed URLs: Lists each invalid URL with error reason
+
+4. OVERALL SUMMARY:
+   - Total counts across all datasets
+   - Overall success rate
+   - Count by status (fully, partially, failed, etc.)
+
+
+═══════════════════════════════════════════════════════════════════════════
+                        HANDLING INVALID URLS
+═══════════════════════════════════════════════════════════════════════════
+
+The script handles invalid URLs gracefully:
+
+✓ Continues downloading even when some URLs fail
+✓ Reports exactly which URLs failed and why
+✓ Shows success rate for each dataset
+✓ Notes that some datasets (CC3M, LAION) naturally have dead URLs
+
+EXAMPLE: If CC3M has 3M image URLs and 30% are dead:
+  Statistics:
+    - Downloaded:  2,100,000/3,000,000 images
+    - Failed:        900,000/3,000,000 images
+    - Success Rate: 70.0%
+
+This is NORMAL and expected for web-scraped datasets!
+
+
+═══════════════════════════════════════════════════════════════════════════
+                        WHY THIS IS USEFUL
+═══════════════════════════════════════════════════════════════════════════
+
+✓ Know exactly what you have
+   - See which datasets are complete
+   - Identify partial downloads
+   - Understand what's missing
+
+✓ Understand data quality
+   - See success rates for each dataset
+   - Know which URLs are dead
+   - Make informed training decisions
+
+✓ Troubleshoot issues
+   - See specific error messages
+   - Identify connection problems
+   - Retry failed downloads specifically
+
+✓ Plan training
+   - Know if you have enough data
+   - Decide whether to retry failed downloads
+   - Understand dataset availability
+
+
+═══════════════════════════════════════════════════════════════════════════
+                            KEY POINTS
+═══════════════════════════════════════════════════════════════════════════
+
+1. The script shows BOTH valid and invalid URLs for EACH dataset
+
+2. You'll see exact counts: downloaded / failed / skipped
+
+3. Failed URLs include error messages (404, timeout, etc.)
+
+4. Success rates help you understand data quality
+
+5. Partial downloads are OKAY - the script continues anyway
+
+6. Dead URLs in CC3M/LAION are NORMAL (web datasets decay over time)
+
+7. The final summary gives you complete visibility into your data
+
+
+═══════════════════════════════════════════════════════════════════════════
+
