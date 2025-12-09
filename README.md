@@ -312,32 +312,165 @@ python export_model.py \
 
 ## Datasets
 
-### Download Datasets
+MicroVLM-E requires several datasets for training across different stages. The download script automatically handles most datasets and will download images directly.
+
+### Prerequisites
+
+**1. Install img2dataset (Required for CC3M and LAION):**
+```bash
+pip install img2dataset
+```
+
+**2. HuggingFace Authentication (Required for LAION):**
+
+LAION dataset requires HuggingFace authentication. Choose one method:
+
+**Option A: Login via CLI (Recommended):**
+```bash
+huggingface-cli login
+# Enter your HuggingFace token when prompted
+```
+
+**Option B: Set environment variable:**
+```bash
+# Windows PowerShell
+$env:HF_TOKEN="your_token_here"
+
+# Linux/Mac
+export HF_TOKEN="your_token_here"
+```
+
+Get your token from: https://huggingface.co/settings/tokens
+
+### Download All Datasets
 
 ```bash
-# Download all datasets
+# Download all datasets automatically
 python scripts/download_datasets.py --all
+```
 
-# Download specific datasets
+**What this does:**
+- Downloads metadata files (TSV, JSON, annotations)
+- Downloads images from direct URLs (COCO, VQA, GQA, etc.)
+- **Automatically runs img2dataset** to download CC3M and LAION images
+- Downloads from HuggingFace (LAION metadata, RefCOCO datasets, LLaVA data)
+- Shows real-time progress and statistics
+- Logs to Weights & Biases for remote monitoring
+
+### Download Specific Datasets
+
+```bash
+# Download only essential datasets for quick start
 python scripts/download_datasets.py --datasets coco vqav2 llava_instruct
 
-# Check download status
+# Download pretraining datasets
+python scripts/download_datasets.py --datasets cc3m laion
+
+# Download VQA datasets
+python scripts/download_datasets.py --datasets vqav2 okvqa aokvqa gqa ocrvqa
+
+# Download grounding datasets
+python scripts/download_datasets.py --datasets refcoco refcoco_plus refcocog
+```
+
+### Check Download Status
+
+```bash
+# Check what's already downloaded and what's missing
 python scripts/download_datasets.py --status
 ```
 
+This will show:
+- Download progress for each dataset
+- Image counts
+- Disk space used
+- Failed/skipped items
+- Missing dependencies
+
 ### Supported Datasets
 
-| Category | Datasets |
-|----------|----------|
-| **Pretraining** | LAION, CC3M, SBU Captions |
-| **Captioning** | COCO Captions, Flickr30k |
-| **VQA** | VQAv2, OK-VQA, A-OKVQA, GQA, OCR-VQA |
-| **Grounding** | RefCOCO, RefCOCO+, RefCOCOg |
-| **Instruction** | LLaVA-Instruct-150K |
+| Category | Datasets | Source | Notes |
+|----------|----------|--------|-------|
+| **Pretraining** | LAION-COCO | HuggingFace | Requires auth, auto-downloads images |
+| | CC3M | Google | Auto-downloads images, ~70-80% success rate |
+| | SBU Captions | Direct | Includes images |
+| **Captioning** | COCO 2017 | Direct | ~25 GB |
+| | Flickr30k | Kaggle | Requires manual setup (optional) |
+| **VQA** | VQAv2 | Direct | Uses COCO images |
+| | OK-VQA | Direct | Uses COCO images |
+| | A-OKVQA | Direct | Uses COCO images |
+| | GQA | Direct | Includes images |
+| | OCR-VQA | Google Drive | Auto-downloads with gdown |
+| **Grounding** | RefCOCO | HuggingFace | Uses COCO images |
+| | RefCOCO+ | HuggingFace | Uses COCO images |
+| | RefCOCOg | HuggingFace | Uses COCO images |
+| **Instruction** | LLaVA-150K | HuggingFace | Uses COCO images |
+
+### Dataset Details
+
+#### Automatic Image Downloads
+
+**CC3M (Conceptual Captions 3M):**
+- TSV files are downloaded first (~500 MB)
+- img2dataset automatically downloads images from URLs (~150 GB)
+- Many URLs are dead - expect 70-80% success rate (this is normal)
+- Takes several hours depending on connection
+
+**LAION-COCO:**
+- Parquet metadata downloaded from HuggingFace (~600 MB)
+- img2dataset automatically downloads images (~50 GB)
+- Requires HuggingFace authentication
+- Some URLs may be dead (normal for web-scraped data)
+
+#### Manual Setup (Optional)
+
+**Flickr30k:**
+Flickr30k is optional and requires manual setup:
+
+1. Create Kaggle account: https://www.kaggle.com/
+2. Get API credentials: https://www.kaggle.com/docs/api
+3. Download dataset:
+```bash
+kaggle datasets download -d hsankesara/flickr-image-dataset
+```
+
+### Remote Monitoring
+
+Download progress is automatically logged to Weights & Biases under project `MicroVLM-E-datasets-logs`.
+
+Each run gets a unique name: `microvlme-datasets-1log`, `microvlme-datasets-2log`, etc.
+
+View your logs at: https://wandb.ai
+
+### Troubleshooting
+
+**Issue: "img2dataset not found"**
+```bash
+pip install img2dataset
+```
+
+**Issue: "LAION download failed - 401 Unauthorized"**
+You need HuggingFace authentication:
+```bash
+huggingface-cli login
+```
+
+**Issue: "RefCOCO download failed"**
+The old UNC server URLs are broken. The script now automatically downloads from HuggingFace instead.
+
+**Issue: "Many CC3M URLs failing"**
+This is normal. CC3M has ~30% dead URLs. The script continues downloading valid ones.
+
+**Issue: "Out of disk space"**
+Full dataset download requires ~300-400 GB. You can download specific datasets to save space:
+```bash
+# Minimal setup (~30 GB)
+python scripts/download_datasets.py --datasets coco vqav2 llava_instruct
+```
 
 ### Dataset Configuration
 
-Edit `configs/datasets/data_config.yaml` to configure dataset paths:
+Edit `configs/datasets/data_config.yaml` to configure dataset paths and usage:
 
 ```yaml
 data_root: data
@@ -348,6 +481,14 @@ datasets:
     enabled: true
     train_images: train2017
     val_images: val2017
+  
+  cc3m:
+    path: data/cc3m
+    enabled: true
+  
+  vqav2:
+    path: data/vqa
+    enabled: true
 ```
 
 ---

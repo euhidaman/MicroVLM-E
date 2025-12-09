@@ -24,6 +24,8 @@ import zipfile
 import tarfile
 import json
 import time
+import sys
+import shutil
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -31,6 +33,16 @@ from typing import Dict, List, Tuple, Optional
 
 import requests
 from tqdm import tqdm
+
+# Try to import datasets for HuggingFace datasets
+try:
+    from datasets import load_dataset
+    from huggingface_hub import hf_hub_download, snapshot_download, HfFolder
+    HF_DATASETS_AVAILABLE = True
+except ImportError:
+    HF_DATASETS_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("datasets/huggingface_hub not installed. HF datasets will be skipped. Install with: pip install datasets huggingface_hub")
 
 # Try to import gdown for Google Drive downloads
 try:
@@ -103,12 +115,14 @@ DATASET_CONFIGS = {
         "name": "LAION-COCO Subset",
         "type": "image_text",
         "description": "LAION subset filtered with COCO-style captions",
-        "urls": [
-            "https://huggingface.co/datasets/laion/laion-coco/resolve/main/part-00000-5b54c5d5-bbcf-484d-a2ce-0d6f73df1a36-c000.snappy.parquet",
+        "hf_dataset": "laion/laion-coco",
+        "hf_files": [
+            "part-00000-5b54c5d5-bbcf-484d-a2ce-0d6f73df1a36-c000.snappy.parquet",
         ],
         "output_dir": "data/laion",
         "size_estimate": "Parquet ~600 MB, Images ~50 GB with img2dataset",
         "post_download": "laion_setup",
+        "requires_hf_token": True,
     },
 
     # =========================================================================
@@ -185,36 +199,33 @@ DATASET_CONFIGS = {
         "name": "RefCOCO",
         "type": "rec",
         "description": "Referring expression comprehension dataset",
-        "urls": [
-            "https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcoco.zip",
-        ],
+        "hf_dataset": "lmms-lab/RefCOCO",
         "images": "coco",
         "output_dir": "data/refcoco",
         "size_estimate": "~50 MB",
+        "use_hf_datasets": True,
     },
 
     "refcoco_plus": {
         "name": "RefCOCO+",
         "type": "rec",
         "description": "RefCOCO+ with no location words",
-        "urls": [
-            "https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcoco+.zip",
-        ],
+        "hf_dataset": "lmms-lab/RefCOCOplus",
         "images": "coco",
         "output_dir": "data/refcoco_plus",
         "size_estimate": "~50 MB",
+        "use_hf_datasets": True,
     },
 
     "refcocog": {
         "name": "RefCOCOg",
         "type": "rec",
         "description": "RefCOCOg with longer expressions",
-        "urls": [
-            "https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcocog.zip",
-        ],
+        "hf_dataset": "lmms-lab/RefCOCOg",
         "images": "coco",
         "output_dir": "data/refcocog",
         "size_estimate": "~50 MB",
+        "use_hf_datasets": True,
     },
 
     # =========================================================================
@@ -429,6 +440,141 @@ def count_images_in_dir(path: str) -> int:
     return count
 
 
+def get_hf_token() -> Optional[str]:
+    """
+    Get HuggingFace token from environment or HF cache.
+
+    Returns:
+        Token string or None
+    """
+    # Try environment variable first
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+
+    if token:
+        return token
+
+    # Try HF cache
+    if HF_DATASETS_AVAILABLE:
+        try:
+            token = HfFolder.get_token()
+            if token:
+                return token
+        except:
+            pass
+
+    return None
+
+
+def download_hf_dataset_files(dataset_name: str, files: List[str], output_dir: str,
+                               requires_token: bool = False) -> Tuple[int, int, int, int]:
+    """
+    Download specific files from a HuggingFace dataset.
+
+    Args:
+        dataset_name: HF dataset name (e.g., "laion/laion-coco")
+        files: List of files to download
+        output_dir: Output directory
+        requires_token: Whether authentication is required
+
+    Returns:
+        Tuple of (downloaded_count, failed_count, total_size, file_count)
+    """
+    if not HF_DATASETS_AVAILABLE:
+        logger.error("huggingface_hub not available. Install with: pip install huggingface_hub")
+        return 0, len(files), 0, 0
+
+    token = get_hf_token() if requires_token else None
+
+    if requires_token and not token:
+        logger.error("HuggingFace token required but not found.")
+        logger.error("Login with: huggingface-cli login")
+        logger.error("Or set HF_TOKEN environment variable")
+        return 0, len(files), 0, 0
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    downloaded = 0
+    failed = 0
+    total_size = 0
+
+    for filename in files:
+        try:
+            logger.info(f"Downloading from HuggingFace: {dataset_name}/{filename}")
+
+            output_path = os.path.join(output_dir, filename)
+
+            # Check if already exists
+            if os.path.exists(output_path):
+                size = get_file_size(output_path)
+                logger.info(f"Already exists: {filename} ({format_bytes(size)})")
+                total_size += size
+                continue
+
+            # Download file
+            downloaded_path = hf_hub_download(
+                repo_id=dataset_name,
+                filename=filename,
+                repo_type="dataset",
+                token=token,
+                cache_dir=None,
+                local_dir=output_dir,
+                local_dir_use_symlinks=False,
+            )
+
+            size = get_file_size(downloaded_path)
+            total_size += size
+            downloaded += 1
+            logger.info(f"✓ Downloaded: {filename} ({format_bytes(size)})")
+
+        except Exception as e:
+            logger.error(f"✗ Failed to download {filename}: {e}")
+            failed += 1
+
+    return downloaded, failed, total_size, downloaded
+
+
+def download_hf_dataset(dataset_name: str, output_dir: str, split: Optional[str] = None) -> Tuple[int, int, int]:
+    """
+    Download an entire HuggingFace dataset using datasets library.
+
+    Args:
+        dataset_name: HF dataset name
+        output_dir: Output directory
+        split: Optional split to download
+
+    Returns:
+        Tuple of (success: 1 or 0, failed: 1 or 0, total_size)
+    """
+    if not HF_DATASETS_AVAILABLE:
+        logger.error("datasets library not available. Install with: pip install datasets")
+        return 0, 1, 0
+
+    try:
+        logger.info(f"Loading HuggingFace dataset: {dataset_name}")
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Load dataset
+        dataset = load_dataset(dataset_name, split=split, cache_dir=output_dir)
+
+        # Save to disk in a standardized format
+        output_path = os.path.join(output_dir, "dataset")
+        dataset.save_to_disk(output_path)
+
+        # Get size
+        total_size, file_count = get_dir_size(output_dir)
+
+        logger.info(f"✓ Successfully downloaded HF dataset: {dataset_name}")
+        logger.info(f"  Saved to: {output_path}")
+        logger.info(f"  Size: {format_bytes(total_size)}, Files: {file_count}")
+
+        return 1, 0, total_size
+
+    except Exception as e:
+        logger.error(f"✗ Failed to download HF dataset {dataset_name}: {e}")
+        return 0, 1, 0
+
+
 def download_file(url: str, output_path: str, chunk_size: int = 8192) -> Tuple[bool, str, int]:
     """
     Download a file from URL with progress bar.
@@ -539,14 +685,26 @@ def extract_archive(archive_path: str, output_dir: str) -> Tuple[bool, str, int,
 
 def setup_cc3m_with_img2dataset(output_dir: str) -> bool:
     """
-    Provide instructions for downloading CC3M images using img2dataset.
+    Automatically download CC3M images using img2dataset.
 
     Args:
         output_dir: CC3M data directory
 
     Returns:
-        True if setup instructions displayed
+        True if download succeeded, False otherwise
     """
+    # Check if img2dataset is available
+    if not shutil.which("img2dataset"):
+        logger.error("img2dataset not found. Install with: pip install img2dataset")
+        logger.info("")
+        logger.info("=" * 70)
+        logger.info("MANUAL SETUP REQUIRED FOR CC3M")
+        logger.info("=" * 70)
+        logger.info("Install img2dataset: pip install img2dataset")
+        logger.info("Then run the download script again.")
+        logger.info("=" * 70)
+        return False
+
     tsv_files = []
 
     # Check for TSV files
@@ -564,41 +722,77 @@ def setup_cc3m_with_img2dataset(output_dir: str) -> bool:
 
     logger.info("")
     logger.info("=" * 70)
-    logger.info("CC3M TSV FILES DOWNLOADED - NEXT STEPS")
+    logger.info("DOWNLOADING CC3M IMAGES WITH IMG2DATASET")
     logger.info("=" * 70)
     logger.info("")
-    logger.info("To download the actual images, you need to use img2dataset.")
-    logger.info("Run the following commands on your remote computer:")
-    logger.info("")
 
+    success = True
     for split_name, tsv_path in tsv_files:
         images_dir = os.path.join(output_dir, f"images_{split_name}")
-        logger.info(f"# Download {split_name} images:")
-        logger.info(f"img2dataset --url_list {tsv_path} \\")
-        logger.info(f"    --output_folder {images_dir} \\")
-        logger.info(f"    --image_size 256 \\")
-        logger.info(f"    --processes_count 16 \\")
-        logger.info(f"    --thread_count 64 \\")
-        logger.info(f"    --resize_mode center_crop \\")
-        logger.info(f"    --output_format webdataset")
-        logger.info("")
 
-    logger.info("Note: CC3M has many dead URLs. Expect ~70-80% success rate.")
+        # Skip if already downloaded
+        if os.path.exists(images_dir) and len(os.listdir(images_dir)) > 0:
+            logger.info(f"CC3M {split_name} images already exist, skipping download.")
+            continue
+
+        logger.info(f"Downloading CC3M {split_name} images...")
+        logger.info(f"Source: {tsv_path}")
+        logger.info(f"Output: {images_dir}")
+        logger.info("Note: CC3M has many dead URLs. This may take several hours and expect ~70-80% success rate.")
+
+        # Run img2dataset
+        cmd = [
+            "img2dataset",
+            "--url_list", tsv_path,
+            "--output_folder", images_dir,
+            "--image_size", "256",
+            "--processes_count", "16",
+            "--thread_count", "64",
+            "--resize_mode", "center_crop",
+            "--output_format", "webdataset",
+            "--enable_wandb", "False",
+        ]
+
+        try:
+            logger.info(f"Running: {' '.join(cmd)}")
+            result = subprocess.run(cmd, check=False, capture_output=False, text=True)
+            if result.returncode == 0:
+                logger.info(f"✓ Successfully downloaded CC3M {split_name} images")
+            else:
+                logger.warning(f"⚠ img2dataset completed with some errors for {split_name} (this is normal for CC3M)")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to run img2dataset for {split_name}: {e}")
+            success = False
+        except Exception as e:
+            logger.error(f"Unexpected error running img2dataset for {split_name}: {e}")
+            success = False
+
     logger.info("=" * 70)
-
-    return True
+    return success
 
 
 def setup_laion_with_img2dataset(output_dir: str) -> bool:
     """
-    Provide instructions for downloading LAION images using img2dataset.
+    Automatically download LAION images using img2dataset.
 
     Args:
         output_dir: LAION data directory
 
     Returns:
-        True if setup instructions displayed
+        True if download succeeded, False otherwise
     """
+    # Check if img2dataset is available
+    if not shutil.which("img2dataset"):
+        logger.error("img2dataset not found. Install with: pip install img2dataset")
+        logger.info("")
+        logger.info("=" * 70)
+        logger.info("MANUAL SETUP REQUIRED FOR LAION")
+        logger.info("=" * 70)
+        logger.info("Install img2dataset: pip install img2dataset")
+        logger.info("Then run the download script again.")
+        logger.info("=" * 70)
+        return False
+
     parquet_files = [f for f in os.listdir(output_dir) if f.endswith('.parquet')]
 
     if not parquet_files:
@@ -607,30 +801,55 @@ def setup_laion_with_img2dataset(output_dir: str) -> bool:
 
     logger.info("")
     logger.info("=" * 70)
-    logger.info("LAION PARQUET FILES DOWNLOADED - NEXT STEPS")
+    logger.info("DOWNLOADING LAION IMAGES WITH IMG2DATASET")
     logger.info("=" * 70)
     logger.info("")
-    logger.info("To download the actual images, you need to use img2dataset.")
-    logger.info("Run the following commands on your remote computer:")
-    logger.info("")
 
+    images_dir = os.path.join(output_dir, "images")
+
+    # Skip if already downloaded
+    if os.path.exists(images_dir) and len(os.listdir(images_dir)) > 0:
+        logger.info(f"LAION images already exist, skipping download.")
+        return True
+
+    success = True
     for parquet_file in parquet_files:
         parquet_path = os.path.join(output_dir, parquet_file)
-        images_dir = os.path.join(output_dir, "images")
-        logger.info(f"# Download LAION images from {parquet_file}:")
-        logger.info(f"img2dataset --url_list {parquet_path} \\")
-        logger.info(f"    --input_format parquet \\")
-        logger.info(f"    --output_folder {images_dir} \\")
-        logger.info(f"    --image_size 256 \\")
-        logger.info(f"    --processes_count 16 \\")
-        logger.info(f"    --thread_count 64 \\")
-        logger.info(f"    --resize_mode center_crop \\")
-        logger.info(f"    --output_format webdataset")
-        logger.info("")
+
+        logger.info(f"Downloading LAION images from: {parquet_file}")
+        logger.info(f"Output: {images_dir}")
+        logger.info("Note: This may take several hours. Some URLs may be dead.")
+
+        # Run img2dataset
+        cmd = [
+            "img2dataset",
+            "--url_list", parquet_path,
+            "--input_format", "parquet",
+            "--output_folder", images_dir,
+            "--image_size", "256",
+            "--processes_count", "16",
+            "--thread_count", "64",
+            "--resize_mode", "center_crop",
+            "--output_format", "webdataset",
+            "--enable_wandb", "False",
+        ]
+
+        try:
+            logger.info(f"Running: {' '.join(cmd)}")
+            result = subprocess.run(cmd, check=False, capture_output=False, text=True)
+            if result.returncode == 0:
+                logger.info(f"✓ Successfully downloaded LAION images from {parquet_file}")
+            else:
+                logger.warning(f"⚠ img2dataset completed with some errors (this is normal)")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to run img2dataset for {parquet_file}: {e}")
+            success = False
+        except Exception as e:
+            logger.error(f"Unexpected error running img2dataset for {parquet_file}: {e}")
+            success = False
 
     logger.info("=" * 70)
-
-    return True
+    return success
 
 
 def download_gdrive_folder(folder_id: str, output_dir: str) -> Tuple[bool, str, int, int]:
@@ -714,6 +933,68 @@ def download_dataset(dataset_name: str, data_root: str = "data", wandb_run: Opti
         "extracted_bytes": 0,
         "extracted_files": 0,
     }
+
+    # Handle HuggingFace datasets if specified
+    if config.get("use_hf_datasets"):
+        hf_dataset_name = config.get("hf_dataset")
+        if hf_dataset_name:
+            logger.info(f"Downloading from HuggingFace datasets: {hf_dataset_name}")
+            downloaded, failed, total_size = download_hf_dataset(hf_dataset_name, output_dir)
+            results["downloaded"] += downloaded
+            results["failed"] += failed
+            results["downloaded_bytes"] += total_size
+
+            if downloaded > 0:
+                results["urls"].append({
+                    "url": f"HuggingFace dataset: {hf_dataset_name}",
+                    "filename": "dataset",
+                    "status": "downloaded",
+                    "error": None,
+                    "size": total_size,
+                })
+            else:
+                results["urls"].append({
+                    "url": f"HuggingFace dataset: {hf_dataset_name}",
+                    "filename": "dataset",
+                    "status": "failed",
+                    "error": "Failed to download HF dataset",
+                    "size": 0,
+                })
+
+    # Handle HuggingFace file downloads if specified
+    elif config.get("hf_dataset") and config.get("hf_files"):
+        hf_dataset_name = config.get("hf_dataset")
+        hf_files = config.get("hf_files", [])
+        requires_token = config.get("requires_hf_token", False)
+
+        logger.info(f"Downloading files from HuggingFace: {hf_dataset_name}")
+        downloaded, failed, total_size, file_count = download_hf_dataset_files(
+            hf_dataset_name, hf_files, output_dir, requires_token
+        )
+
+        results["downloaded"] += downloaded
+        results["failed"] += failed
+        results["downloaded_bytes"] += total_size
+
+        for hf_file in hf_files:
+            file_path = os.path.join(output_dir, hf_file)
+            if os.path.exists(file_path):
+                file_size = get_file_size(file_path)
+                results["urls"].append({
+                    "url": f"HF: {hf_dataset_name}/{hf_file}",
+                    "filename": hf_file,
+                    "status": "downloaded",
+                    "error": None,
+                    "size": file_size,
+                })
+            else:
+                results["urls"].append({
+                    "url": f"HF: {hf_dataset_name}/{hf_file}",
+                    "filename": hf_file,
+                    "status": "failed",
+                    "error": "File not downloaded",
+                    "size": 0,
+                })
 
     # Attempt to download ALL URLs (no early exit)
     for url in config.get("urls", []):
