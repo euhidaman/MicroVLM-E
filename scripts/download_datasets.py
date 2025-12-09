@@ -115,7 +115,7 @@ DATASET_CONFIGS = {
         "name": "LAION-COCO Subset",
         "type": "image_text",
         "description": "LAION subset filtered with COCO-style captions",
-        "hf_dataset": "laion/laion-coco",
+        "hf_dataset": "laion/relaion-coco",
         "hf_files": [
             "part-00000-5b54c5d5-bbcf-484d-a2ce-0d6f73df1a36-c000.snappy.parquet",
         ],
@@ -1014,11 +1014,30 @@ def download_dataset(dataset_name: str, data_root: str = "data", wandb_run: Opti
         # Check if already exists
         if os.path.exists(download_path):
             existing_size = get_file_size(download_path)
-            logger.info(f"Already exists, skipping: {filename} ({format_bytes(existing_size)})")
+            logger.info(f"Already exists, skipping download: {filename} ({format_bytes(existing_size)})")
             url_result["status"] = "skipped"
             url_result["error"] = "File already exists"
             url_result["size"] = existing_size
             results["skipped"] += 1
+
+            # But still try to extract if it's an archive and hasn't been extracted yet
+            if filename.endswith((".zip", ".tar.gz", ".tgz", ".tar")):
+                # Check if already extracted by looking for extracted files in the directory
+                # (simple heuristic: if there are more files than just the archives, it's probably extracted)
+                existing_files = len([f for f in os.listdir(output_dir) if os.path.isfile(os.path.join(output_dir, f))])
+                if existing_files <= len(config.get("urls", [])):  # Only archive files present
+                    logger.info(f"Archive not yet extracted, extracting: {filename}")
+                    extract_success, extract_error, extracted_size, extracted_files = extract_archive(download_path, output_dir)
+                    if extract_success:
+                        url_result["extracted_size"] = extracted_size
+                        url_result["extracted_files"] = extracted_files
+                        results["extracted_bytes"] += extracted_size
+                        results["extracted_files"] += extracted_files
+                        logger.info(f"✓ Extracted {extracted_files} files ({format_bytes(extracted_size)})")
+                    else:
+                        url_result["extraction_error"] = extract_error
+                        logger.error(f"✗ Failed to extract {filename}: {extract_error}")
+
             results["urls"].append(url_result)
             continue
 
@@ -1033,14 +1052,17 @@ def download_dataset(dataset_name: str, data_root: str = "data", wandb_run: Opti
 
             # Attempt extraction if archive
             if filename.endswith((".zip", ".tar.gz", ".tgz", ".tar")):
+                logger.info(f"Extracting archive: {filename}")
                 extract_success, extract_error, extracted_size, extracted_files = extract_archive(download_path, output_dir)
                 if extract_success:
                     url_result["extracted_size"] = extracted_size
                     url_result["extracted_files"] = extracted_files
                     results["extracted_bytes"] += extracted_size
                     results["extracted_files"] += extracted_files
+                    logger.info(f"✓ Extracted {extracted_files} files ({format_bytes(extracted_size)})")
                 else:
                     url_result["extraction_error"] = extract_error
+                    logger.error(f"✗ Failed to extract {filename}: {extract_error}")
         else:
             url_result["status"] = "failed"
             url_result["error"] = error
@@ -1517,7 +1539,7 @@ def print_final_summary(results: Dict):
 
 
 def print_status(data_root: str = "data"):
-    """Print current dataset status."""
+    """Print current dataset status with warnings for incomplete downloads."""
     print("")
     print("=" * 70)
     print("DATASET STATUS")
@@ -1526,12 +1548,41 @@ def print_status(data_root: str = "data"):
     print("")
     print("DOWNLOADABLE DATASETS:")
     print("-" * 70)
+
+    warnings = []
+
     for ds_name, config in DATASET_CONFIGS.items():
         output_dir = os.path.join(data_root, os.path.basename(config["output_dir"]))
         exists = os.path.exists(output_dir) and len(os.listdir(output_dir)) > 0
-        status = "✓ Present" if exists else "✗ Missing"
+
+        if exists:
+            image_count = count_images_in_dir(output_dir)
+            dir_size, file_count = get_dir_size(output_dir)
+
+            # Special checks for CC3M and LAION
+            if ds_name in ["cc3m", "laion"]:
+                img2dataset_stats = get_img2dataset_stats(output_dir)
+                if img2dataset_stats.get("has_img2dataset_output", False):
+                    status = "✓ Present"
+                    if image_count > 0:
+                        status += f" ({image_count:,} images)"
+                else:
+                    status = "⚠ Incomplete"
+                    warnings.append(f"{config['name']}: Metadata downloaded but images missing. Run download script to complete.")
+            else:
+                status = "✓ Present"
+                if image_count > 0:
+                    status += f" ({image_count:,} images)"
+                elif file_count > 0:
+                    status += f" ({file_count} files)"
+        else:
+            status = "✗ Missing"
+
         print(f"  {config['name']:<35} {status}")
-        print(f"      Size: {config.get('size_estimate', 'Unknown'):<15} Path: {output_dir}")
+        if exists:
+            print(f"      Size: {format_bytes(dir_size):<15} Path: {output_dir}")
+        else:
+            print(f"      Expected: {config.get('size_estimate', 'Unknown'):<15} Path: {output_dir}")
 
     print("")
     print("SPECIAL ACCESS DATASETS (require manual download):")
@@ -1540,12 +1591,103 @@ def print_status(data_root: str = "data"):
         print(f"  ⊘ {config['name']}")
         print(f"      {config['reason']}")
 
+    if warnings:
+        print("")
+        print("WARNINGS:")
+        print("-" * 70)
+        for warning in warnings:
+            print(f"  ⚠ {warning}")
+
     print("")
+    print("=" * 70)
+    print("TIP: Use --stats for detailed statistics including extraction status")
     print("=" * 70)
 
 
+def get_img2dataset_stats(output_dir: str) -> Dict:
+    """
+    Parse img2dataset statistics from webdataset format or stats files.
+
+    Returns:
+        Dictionary with successful_downloads, failed_downloads, total_attempted
+    """
+    stats = {
+        "successful_downloads": 0,
+        "failed_downloads": 0,
+        "total_attempted": 0,
+        "has_img2dataset_output": False,
+    }
+
+    # Check for webdataset tar files (img2dataset output format)
+    if os.path.exists(output_dir):
+        # Count webdataset shards
+        tar_files = [f for f in os.listdir(output_dir) if f.endswith('.tar')]
+        if tar_files:
+            stats["has_img2dataset_output"] = True
+            # Rough estimate: each tar typically contains ~1000 images
+            stats["successful_downloads"] = len(tar_files) * 1000
+
+        # Look for stats.json or similar img2dataset output
+        stats_file = os.path.join(output_dir, "stats.json")
+        if os.path.exists(stats_file):
+            try:
+                import json
+                with open(stats_file, 'r') as f:
+                    img2dataset_stats = json.load(f)
+                    stats["successful_downloads"] = img2dataset_stats.get("successful", 0)
+                    stats["failed_downloads"] = img2dataset_stats.get("failed", 0)
+                    stats["total_attempted"] = img2dataset_stats.get("total", 0)
+            except:
+                pass
+
+        # Check for subdirectories with images (training/validation splits)
+        for subdir in ["images_training", "images_validation", "images"]:
+            subdir_path = os.path.join(output_dir, subdir)
+            if os.path.exists(subdir_path):
+                stats["has_img2dataset_output"] = True
+                # Count images or webdataset shards in subdirectory
+                subdir_images = count_images_in_dir(subdir_path)
+                stats["successful_downloads"] += subdir_images
+
+    return stats
+
+
+def get_archive_extraction_status(output_dir: str, dataset_config: Dict) -> Dict:
+    """
+    Check if archives have been extracted.
+
+    Returns:
+        Dictionary with extracted, not_extracted, total_archives
+    """
+    status = {
+        "total_archives": 0,
+        "extracted": 0,
+        "not_extracted": 0,
+        "archive_files": [],
+    }
+
+    if not os.path.exists(output_dir):
+        return status
+
+    # Count archives
+    archives = [f for f in os.listdir(output_dir)
+                if f.endswith(('.zip', '.tar', '.tar.gz', '.tgz'))]
+    status["total_archives"] = len(archives)
+    status["archive_files"] = archives
+
+    # Heuristic: if there are many more files than archives, likely extracted
+    total_files = len([f for f in os.listdir(output_dir) if os.path.isfile(os.path.join(output_dir, f))])
+
+    if total_files > status["total_archives"] * 2:  # Arbitrary multiplier
+        status["extracted"] = status["total_archives"]
+    else:
+        status["not_extracted"] = status["total_archives"]
+
+    return status
+
+
 def print_comprehensive_stats(data_root: str = "data"):
-    """Print comprehensive statistics about downloaded datasets."""
+    """Print comprehensive statistics about downloaded datasets with detailed extraction and image download info."""
     print("")
     print("#" * 80)
     print("# COMPREHENSIVE DATASET STATISTICS")
@@ -1557,6 +1699,8 @@ def print_comprehensive_stats(data_root: str = "data"):
     total_size = 0
     total_files = 0
     total_images = 0
+    total_successful_img_downloads = 0
+    total_failed_img_downloads = 0
 
     dataset_stats = []
 
@@ -1568,6 +1712,18 @@ def print_comprehensive_stats(data_root: str = "data"):
             dir_size, file_count = get_dir_size(output_dir)
             image_count = count_images_in_dir(output_dir)
 
+            # Get img2dataset stats if applicable
+            img2dataset_stats = {"has_img2dataset_output": False}
+            if ds_name in ["cc3m", "laion"]:
+                img2dataset_stats = get_img2dataset_stats(output_dir)
+                if img2dataset_stats["successful_downloads"] > 0:
+                    image_count = max(image_count, img2dataset_stats["successful_downloads"])
+                total_successful_img_downloads += img2dataset_stats.get("successful_downloads", 0)
+                total_failed_img_downloads += img2dataset_stats.get("failed_downloads", 0)
+
+            # Check archive extraction status
+            extraction_status = get_archive_extraction_status(output_dir, config)
+
             total_datasets_present += 1
             total_size += dir_size
             total_files += file_count
@@ -1575,23 +1731,29 @@ def print_comprehensive_stats(data_root: str = "data"):
 
             dataset_stats.append({
                 "name": config["name"],
+                "dataset_key": ds_name,
                 "status": "present",
                 "path": output_dir,
                 "size": dir_size,
                 "files": file_count,
                 "images": image_count,
                 "type": config.get("type", "unknown"),
+                "img2dataset_stats": img2dataset_stats,
+                "extraction_status": extraction_status,
             })
         else:
             total_datasets_missing += 1
             dataset_stats.append({
                 "name": config["name"],
+                "dataset_key": ds_name,
                 "status": "missing",
                 "path": output_dir,
                 "size": 0,
                 "files": 0,
                 "images": 0,
                 "type": config.get("type", "unknown"),
+                "img2dataset_stats": {"has_img2dataset_output": False},
+                "extraction_status": {"total_archives": 0, "extracted": 0, "not_extracted": 0},
             })
 
     # Print overall summary
@@ -1604,6 +1766,13 @@ def print_comprehensive_stats(data_root: str = "data"):
     print(f"  Total Storage Used:  {format_bytes(total_size)}")
     print(f"  Total Files:         {total_files}")
     print(f"  Total Images:        {total_images}")
+    if total_successful_img_downloads > 0 or total_failed_img_downloads > 0:
+        print(f"\n  Image Download Statistics (CC3M/LAION):")
+        print(f"    Successfully Downloaded: {total_successful_img_downloads}")
+        print(f"    Failed Downloads:        {total_failed_img_downloads}")
+        if total_successful_img_downloads + total_failed_img_downloads > 0:
+            success_rate = (total_successful_img_downloads / (total_successful_img_downloads + total_failed_img_downloads)) * 100
+            print(f"    Success Rate:            {success_rate:.1f}%")
 
     # Print by category
     print("")
@@ -1656,18 +1825,66 @@ def print_comprehensive_stats(data_root: str = "data"):
                 print(f"  Images:       {stat['images']}")
             print(f"  Type:         {stat['type']}")
 
+            # Archive extraction status
+            extraction_status = stat.get("extraction_status", {})
+            if extraction_status.get("total_archives", 0) > 0:
+                print(f"\n  Archive Extraction:")
+                if extraction_status.get("extracted", 0) > 0:
+                    print(f"    ✓ Extracted:     {extraction_status['extracted']}/{extraction_status['total_archives']} archives")
+                if extraction_status.get("not_extracted", 0) > 0:
+                    print(f"    ⚠ Not Extracted: {extraction_status['not_extracted']}/{extraction_status['total_archives']} archives")
+                    print(f"      Run download script again to extract")
+
+            # img2dataset statistics (for CC3M and LAION)
+            img2dataset_stats = stat.get("img2dataset_stats", {})
+            ds_key = stat.get("dataset_key", "")
+            if ds_key in ["cc3m", "laion"]:
+                print(f"\n  Image Download Status:")
+                if img2dataset_stats.get("has_img2dataset_output", False):
+                    successful = img2dataset_stats.get("successful_downloads", 0)
+                    failed = img2dataset_stats.get("failed_downloads", 0)
+                    total_attempted = img2dataset_stats.get("total_attempted", 0)
+
+                    if successful > 0:
+                        print(f"    ✓ Successfully Downloaded: {successful:,} images")
+                    if failed > 0:
+                        print(f"    ✗ Failed Downloads:        {failed:,} images")
+                    if total_attempted > 0:
+                        print(f"    Total Attempted:           {total_attempted:,}")
+                        success_rate = (successful / total_attempted) * 100
+                        print(f"    Success Rate:              {success_rate:.1f}%")
+                    elif successful > 0:
+                        # Estimate based on typical success rates
+                        if ds_key == "cc3m":
+                            print(f"    Estimated Success Rate:    70-80% (typical for CC3M)")
+                        else:
+                            print(f"    Estimated Success Rate:    80-90% (typical for LAION)")
+                else:
+                    # Check if TSV/parquet files exist but images don't
+                    if os.path.exists(stat['path']):
+                        tsv_files = len([f for f in os.listdir(stat['path']) if f.endswith('.tsv')])
+                        parquet_files = len([f for f in os.listdir(stat['path']) if f.endswith('.parquet')])
+
+                        if tsv_files > 0 or parquet_files > 0:
+                            print(f"    ⚠ Metadata downloaded, images NOT downloaded yet")
+                            print(f"      TSV files: {tsv_files}, Parquet files: {parquet_files}")
+                            print(f"      Run: python scripts/download_datasets.py --all")
+                            print(f"      This will automatically run img2dataset to download images")
+
             # Check for specific file types
             if os.path.exists(stat['path']):
                 json_files = len([f for f in os.listdir(stat['path']) if f.endswith('.json')])
                 tsv_files = len([f for f in os.listdir(stat['path']) if f.endswith('.tsv')])
                 parquet_files = len([f for f in os.listdir(stat['path']) if f.endswith('.parquet')])
 
-                if json_files > 0:
-                    print(f"  JSON files:   {json_files}")
-                if tsv_files > 0:
-                    print(f"  TSV files:    {tsv_files}")
-                if parquet_files > 0:
-                    print(f"  Parquet files: {parquet_files}")
+                if json_files > 0 or tsv_files > 0 or parquet_files > 0:
+                    print(f"\n  Metadata Files:")
+                    if json_files > 0:
+                        print(f"    JSON files:    {json_files}")
+                    if tsv_files > 0:
+                        print(f"    TSV files:     {tsv_files}")
+                    if parquet_files > 0:
+                        print(f"    Parquet files: {parquet_files}")
         else:
             print(f"  Status:       ✗ MISSING")
             print(f"  Location:     {stat['path']}")

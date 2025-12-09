@@ -351,11 +351,17 @@ python scripts/download_datasets.py --all
 
 **What this does:**
 - Downloads metadata files (TSV, JSON, annotations)
+- **Automatically extracts all ZIP/TAR archives**
 - Downloads images from direct URLs (COCO, VQA, GQA, etc.)
 - **Automatically runs img2dataset** to download CC3M and LAION images
 - Downloads from HuggingFace (LAION metadata, RefCOCO datasets, LLaVA data)
 - Shows real-time progress and statistics
 - Logs to Weights & Biases for remote monitoring
+
+**Note:** If you re-run the download script, it will:
+- Skip files that already exist
+- Extract archives that haven't been extracted yet
+- Run img2dataset for CC3M/LAION if images aren't present
 
 ### Download Specific Datasets
 
@@ -442,6 +448,35 @@ Each run gets a unique name: `microvlme-datasets-1log`, `microvlme-datasets-2log
 
 View your logs at: https://wandb.ai
 
+### Verifying Downloads
+
+After running the download script, check the status:
+
+```bash
+python scripts/download_datasets.py --status
+```
+
+**What to expect for complete downloads:**
+
+| Dataset | Expected Files | Expected Images | Expected Size |
+|---------|---------------|-----------------|---------------|
+| COCO 2017 | ~120k files | ~123k images | ~25-40 GB |
+| CC3M | Varies | ~2-2.5M images | ~150-200 GB |
+| LAION | Varies | ~600k images | ~50 GB |
+| GQA | ~150k files | ~150k images | ~20 GB |
+| VQAv2 | ~10 JSON files | 0 (uses COCO) | ~600 MB |
+| RefCOCO | ~30 files | 0 (uses COCO) | ~5-6 GB |
+| LLaVA | 1 JSON file | 0 (uses COCO) | ~200 MB |
+
+**Key indicators of successful download:**
+- **CC3M**: Should show millions of images, not just 2 TSV files
+- **LAION**: Should show hundreds of thousands of images, not just parquet files
+- **COCO**: Should show ~123k images extracted from ZIP archives
+- **GQA**: Should show ~150k images extracted
+- **RefCOCO**: Should show dataset files extracted from archives
+
+If you see only a few files and 0 images for CC3M/LAION, the img2dataset step hasn't run yet.
+
 ### Troubleshooting
 
 **Issue: "img2dataset not found"**
@@ -460,6 +495,18 @@ The old UNC server URLs are broken. The script now automatically downloads from 
 
 **Issue: "Many CC3M URLs failing"**
 This is normal. CC3M has ~30% dead URLs. The script continues downloading valid ones.
+
+**Issue: "Archives downloaded but not extracted"**
+Re-run the download script - it will skip downloading and extract any unextracted archives:
+```bash
+python scripts/download_datasets.py --all
+```
+
+**Issue: "CC3M/LAION show 0 images"**
+The TSV/parquet files are downloaded but img2dataset hasn't run yet:
+1. Ensure img2dataset is installed: `pip install img2dataset`
+2. Re-run the download script: `python scripts/download_datasets.py --all`
+3. The script will automatically run img2dataset for CC3M and LAION
 
 **Issue: "Out of disk space"**
 Full dataset download requires ~300-400 GB. You can download specific datasets to save space:
