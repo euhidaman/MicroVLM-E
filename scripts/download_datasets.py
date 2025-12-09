@@ -371,12 +371,70 @@ def finalize_wandb(run: Optional[object]):
 # DOWNLOAD FUNCTIONS
 # =============================================================================
 
-def download_file(url: str, output_path: str, chunk_size: int = 8192) -> Tuple[bool, str]:
+def get_file_size(path: str) -> int:
+    """Get file size in bytes."""
+    try:
+        return os.path.getsize(path)
+    except:
+        return 0
+
+
+def get_dir_size(path: str) -> Tuple[int, int]:
+    """
+    Get total size and file count of directory recursively.
+
+    Returns:
+        Tuple of (total_bytes, file_count)
+    """
+    total_size = 0
+    file_count = 0
+
+    try:
+        for dirpath, dirnames, filenames in os.walk(path):
+            for filename in filenames:
+                filepath = os.path.join(dirpath, filename)
+                try:
+                    total_size += os.path.getsize(filepath)
+                    file_count += 1
+                except:
+                    pass
+    except:
+        pass
+
+    return total_size, file_count
+
+
+def format_bytes(bytes_val: int) -> str:
+    """Format bytes to human-readable string."""
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if bytes_val < 1024.0:
+            return f"{bytes_val:.2f} {unit}"
+        bytes_val /= 1024.0
+    return f"{bytes_val:.2f} PB"
+
+
+def count_images_in_dir(path: str) -> int:
+    """Count image files in directory."""
+    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff'}
+    count = 0
+
+    try:
+        for dirpath, dirnames, filenames in os.walk(path):
+            for filename in filenames:
+                if any(filename.lower().endswith(ext) for ext in image_extensions):
+                    count += 1
+    except:
+        pass
+
+    return count
+
+
+def download_file(url: str, output_path: str, chunk_size: int = 8192) -> Tuple[bool, str, int]:
     """
     Download a file from URL with progress bar.
 
     Returns:
-        Tuple of (success: bool, error_message: str)
+        Tuple of (success: bool, error_message: str, file_size: int)
     """
     try:
         logger.info(f"Downloading: {url}")
@@ -391,6 +449,7 @@ def download_file(url: str, output_path: str, chunk_size: int = 8192) -> Tuple[b
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
         # Download with progress bar
+        downloaded_size = 0
         with open(output_path, "wb") as f:
             with tqdm(total=total_size, unit="B", unit_scale=True,
                      desc=os.path.basename(output_path)) as pbar:
@@ -398,41 +457,46 @@ def download_file(url: str, output_path: str, chunk_size: int = 8192) -> Tuple[b
                     if chunk:
                         f.write(chunk)
                         pbar.update(len(chunk))
-
-        logger.info(f"Successfully downloaded: {os.path.basename(output_path)}")
-        return True, ""
+                        downloaded_size += len(chunk)
+        # Get actual file size
+        actual_size = get_file_size(output_path)
+        logger.info(f"Successfully downloaded: {os.path.basename(output_path)} ({format_bytes(actual_size)})")
+        return True, "", actual_size
 
     except requests.exceptions.HTTPError as e:
         error_msg = f"HTTP Error {e.response.status_code}: {str(e)}"
         logger.error(f"Failed to download {url}: {error_msg}")
-        return False, error_msg
+        return False, error_msg, 0
 
     except requests.exceptions.ConnectionError as e:
         error_msg = f"Connection Error: {str(e)}"
         logger.error(f"Failed to download {url}: {error_msg}")
-        return False, error_msg
+        return False, error_msg, 0
 
     except requests.exceptions.Timeout as e:
         error_msg = f"Timeout Error: {str(e)}"
         logger.error(f"Failed to download {url}: {error_msg}")
-        return False, error_msg
+        return False, error_msg, 0
 
     except Exception as e:
         error_msg = f"Unexpected Error: {str(e)}"
         logger.error(f"Failed to download {url}: {error_msg}")
-        return False, error_msg
+        return False, error_msg, 0
 
 
-def extract_archive(archive_path: str, output_dir: str) -> Tuple[bool, str]:
+def extract_archive(archive_path: str, output_dir: str) -> Tuple[bool, str, int, int]:
     """
     Extract archive file (zip, tar.gz, tar).
 
     Returns:
-        Tuple of (success: bool, error_message: str)
+        Tuple of (success: bool, error_message: str, extracted_size: int, extracted_files: int)
     """
     try:
         logger.info(f"Extracting: {os.path.basename(archive_path)}")
         os.makedirs(output_dir, exist_ok=True)
+
+        # Get size before extraction
+        size_before, files_before = get_dir_size(output_dir)
 
         if archive_path.endswith(".zip"):
             with zipfile.ZipFile(archive_path, "r") as zip_ref:
@@ -446,25 +510,31 @@ def extract_archive(archive_path: str, output_dir: str) -> Tuple[bool, str]:
             with tarfile.open(archive_path, "r") as tar_ref:
                 tar_ref.extractall(output_dir)
         else:
-            return False, f"Unknown archive format: {archive_path}"
+            return False, f"Unknown archive format: {archive_path}", 0, 0
 
-        logger.info(f"Successfully extracted: {os.path.basename(archive_path)}")
-        return True, ""
+        # Get size after extraction
+        size_after, files_after = get_dir_size(output_dir)
+        extracted_size = size_after - size_before
+        extracted_files = files_after - files_before
+
+        logger.info(f"Successfully extracted: {os.path.basename(archive_path)} "
+                   f"({extracted_files} files, {format_bytes(extracted_size)})")
+        return True, "", extracted_size, extracted_files
 
     except zipfile.BadZipFile as e:
         error_msg = f"Bad ZIP file: {str(e)}"
         logger.error(f"Failed to extract {archive_path}: {error_msg}")
-        return False, error_msg
+        return False, error_msg, 0, 0
 
     except tarfile.TarError as e:
         error_msg = f"TAR error: {str(e)}"
         logger.error(f"Failed to extract {archive_path}: {error_msg}")
-        return False, error_msg
+        return False, error_msg, 0, 0
 
     except Exception as e:
         error_msg = f"Extraction error: {str(e)}"
         logger.error(f"Failed to extract {archive_path}: {error_msg}")
-        return False, error_msg
+        return False, error_msg, 0, 0
 
 
 def setup_cc3m_with_img2dataset(output_dir: str) -> bool:
@@ -563,7 +633,7 @@ def setup_laion_with_img2dataset(output_dir: str) -> bool:
     return True
 
 
-def download_gdrive_folder(folder_id: str, output_dir: str) -> Tuple[bool, str]:
+def download_gdrive_folder(folder_id: str, output_dir: str) -> Tuple[bool, str, int, int]:
     """
     Download files from Google Drive folder using gdown.
 
@@ -572,26 +642,35 @@ def download_gdrive_folder(folder_id: str, output_dir: str) -> Tuple[bool, str]:
         output_dir: Local output directory
 
     Returns:
-        Tuple of (success: bool, error_message: str)
+        Tuple of (success: bool, error_message: str, total_size: int, file_count: int)
     """
     if not GDOWN_AVAILABLE:
-        return False, "gdown not installed. Install with: pip install gdown"
+        return False, "gdown not installed. Install with: pip install gdown", 0, 0
 
     try:
         logger.info(f"Downloading Google Drive folder: {folder_id}")
         os.makedirs(output_dir, exist_ok=True)
 
+        # Get size before download
+        size_before, files_before = get_dir_size(output_dir)
+
         # Download entire folder
         url = f"https://drive.google.com/drive/folders/{folder_id}"
         gdown.download_folder(url, output=output_dir, quiet=False, use_cookies=False)
 
-        logger.info(f"Successfully downloaded Google Drive folder to: {output_dir}")
-        return True, ""
+        # Get size after download
+        size_after, files_after = get_dir_size(output_dir)
+        downloaded_size = size_after - size_before
+        downloaded_files = files_after - files_before
+
+        logger.info(f"Successfully downloaded Google Drive folder to: {output_dir} "
+                   f"({downloaded_files} files, {format_bytes(downloaded_size)})")
+        return True, "", downloaded_size, downloaded_files
 
     except Exception as e:
         error_msg = f"Failed to download Google Drive folder: {str(e)}"
         logger.error(error_msg)
-        return False, error_msg
+        return False, error_msg, 0, 0
 
 
 def download_dataset(dataset_name: str, data_root: str = "data", wandb_run: Optional[object] = None) -> Dict:
@@ -631,6 +710,9 @@ def download_dataset(dataset_name: str, data_root: str = "data", wandb_run: Opti
         "downloaded": 0,
         "failed": 0,
         "skipped": 0,
+        "downloaded_bytes": 0,
+        "extracted_bytes": 0,
+        "extracted_files": 0,
     }
 
     # Attempt to download ALL URLs (no early exit)
@@ -643,28 +725,40 @@ def download_dataset(dataset_name: str, data_root: str = "data", wandb_run: Opti
             "filename": filename,
             "status": None,
             "error": None,
+            "size": 0,
+            "extracted_size": 0,
+            "extracted_files": 0,
         }
 
         # Check if already exists
         if os.path.exists(download_path):
-            logger.info(f"Already exists, skipping: {filename}")
+            existing_size = get_file_size(download_path)
+            logger.info(f"Already exists, skipping: {filename} ({format_bytes(existing_size)})")
             url_result["status"] = "skipped"
             url_result["error"] = "File already exists"
+            url_result["size"] = existing_size
             results["skipped"] += 1
             results["urls"].append(url_result)
             continue
 
         # Attempt download
-        success, error = download_file(url, download_path)
+        success, error, file_size = download_file(url, download_path)
 
         if success:
             url_result["status"] = "downloaded"
+            url_result["size"] = file_size
             results["downloaded"] += 1
+            results["downloaded_bytes"] += file_size
 
             # Attempt extraction if archive
             if filename.endswith((".zip", ".tar.gz", ".tgz", ".tar")):
-                extract_success, extract_error = extract_archive(download_path, output_dir)
-                if not extract_success:
+                extract_success, extract_error, extracted_size, extracted_files = extract_archive(download_path, output_dir)
+                if extract_success:
+                    url_result["extracted_size"] = extracted_size
+                    url_result["extracted_files"] = extracted_files
+                    results["extracted_bytes"] += extracted_size
+                    results["extracted_files"] += extracted_files
+                else:
                     url_result["extraction_error"] = extract_error
         else:
             url_result["status"] = "failed"
@@ -673,20 +767,33 @@ def download_dataset(dataset_name: str, data_root: str = "data", wandb_run: Opti
 
         results["urls"].append(url_result)
 
+        # Log progress to wandb after each file
+        if wandb_run is not None:
+            log_to_wandb(wandb_run, {
+                f"dataset/{dataset_name}/progress/files_downloaded": results["downloaded"],
+                f"dataset/{dataset_name}/progress/files_failed": results["failed"],
+                f"dataset/{dataset_name}/progress/bytes_downloaded": results["downloaded_bytes"],
+                f"dataset/{dataset_name}/progress/bytes_extracted": results["extracted_bytes"],
+            })
+
     # Handle Google Drive downloads if specified
     if config.get("gdrive_folder_id"):
         logger.info("Attempting Google Drive download...")
-        gdrive_success, gdrive_error = download_gdrive_folder(
+        gdrive_success, gdrive_error, gdrive_size, gdrive_files = download_gdrive_folder(
             config["gdrive_folder_id"],
             output_dir
         )
         if gdrive_success:
             results["downloaded"] += 1
+            results["downloaded_bytes"] += gdrive_size
+            results["extracted_files"] += gdrive_files
             results["urls"].append({
                 "url": f"Google Drive folder {config['gdrive_folder_id']}",
                 "filename": "folder",
                 "status": "downloaded",
                 "error": None,
+                "size": gdrive_size,
+                "extracted_files": gdrive_files,
             })
         else:
             results["failed"] += 1
@@ -695,6 +802,7 @@ def download_dataset(dataset_name: str, data_root: str = "data", wandb_run: Opti
                 "filename": "folder",
                 "status": "failed",
                 "error": gdrive_error,
+                "size": 0,
             })
 
     # Run post-download setup if specified
@@ -704,12 +812,25 @@ def download_dataset(dataset_name: str, data_root: str = "data", wandb_run: Opti
     elif post_download_action == "laion_setup":
         setup_laion_with_img2dataset(output_dir)
 
+    # Get final directory statistics
+    total_dir_size, total_files = get_dir_size(output_dir)
+    image_count = count_images_in_dir(output_dir)
+
+    results["total_directory_size"] = total_dir_size
+    results["total_files_in_directory"] = total_files
+    results["image_count"] = image_count
+
     # Summary for this dataset
     total = len(config.get("urls", [])) + (1 if config.get("gdrive_folder_id") else 0)
     logger.info(f"Completed {config['name']}: {results['downloaded']}/{total} downloaded, "
                 f"{results['failed']} failed, {results['skipped']} skipped")
+    logger.info(f"  Downloaded: {format_bytes(results['downloaded_bytes'])}")
+    logger.info(f"  Extracted: {results['extracted_files']} files, {format_bytes(results['extracted_bytes'])}")
+    logger.info(f"  Total in directory: {total_files} files ({format_bytes(total_dir_size)})")
+    if image_count > 0:
+        logger.info(f"  Images found: {image_count}")
 
-    # Log to wandb
+    # Log to wandb with comprehensive stats
     if wandb_run is not None:
         success_rate = (results['downloaded'] / (results['downloaded'] + results['failed']) * 100) if (results['downloaded'] + results['failed']) > 0 else 0
         log_to_wandb(wandb_run, {
@@ -718,6 +839,12 @@ def download_dataset(dataset_name: str, data_root: str = "data", wandb_run: Opti
             f"dataset/{dataset_name}/skipped": results['skipped'],
             f"dataset/{dataset_name}/total": total,
             f"dataset/{dataset_name}/success_rate": success_rate,
+            f"dataset/{dataset_name}/downloaded_bytes": results['downloaded_bytes'],
+            f"dataset/{dataset_name}/extracted_bytes": results['extracted_bytes'],
+            f"dataset/{dataset_name}/extracted_files": results['extracted_files'],
+            f"dataset/{dataset_name}/total_directory_size": total_dir_size,
+            f"dataset/{dataset_name}/total_files": total_files,
+            f"dataset/{dataset_name}/image_count": image_count,
         })
 
     return results
@@ -741,6 +868,12 @@ def download_all_datasets(data_root: str = "data", wandb_run: Optional[object] =
         "total_files_downloaded": 0,
         "total_files_failed": 0,
         "total_files_skipped": 0,
+        "total_bytes_downloaded": 0,
+        "total_bytes_extracted": 0,
+        "total_extracted_files": 0,
+        "total_directory_size": 0,
+        "total_files_in_directories": 0,
+        "total_images": 0,
         "start_time": time.time(),
     }
 
@@ -776,9 +909,16 @@ def download_all_datasets(data_root: str = "data", wandb_run: Optional[object] =
     for idx, dataset_name in enumerate(DATASET_CONFIGS):
         result = download_dataset(dataset_name, data_root, wandb_run)
 
+        # Aggregate all statistics
         all_results["total_files_downloaded"] += result.get("downloaded", 0)
         all_results["total_files_failed"] += result.get("failed", 0)
         all_results["total_files_skipped"] += result.get("skipped", 0)
+        all_results["total_bytes_downloaded"] += result.get("downloaded_bytes", 0)
+        all_results["total_bytes_extracted"] += result.get("extracted_bytes", 0)
+        all_results["total_extracted_files"] += result.get("extracted_files", 0)
+        all_results["total_directory_size"] += result.get("total_directory_size", 0)
+        all_results["total_files_in_directories"] += result.get("total_files_in_directory", 0)
+        all_results["total_images"] += result.get("image_count", 0)
 
         # Store all results (even successful ones) for detailed reporting
         if result.get("failed", 0) == 0 and result.get("downloaded", 0) > 0:
@@ -848,6 +988,17 @@ def download_all_datasets(data_root: str = "data", wandb_run: Optional[object] =
             "summary/failed_datasets": failed_datasets,
             "summary/skipped_special_access": len(all_results['skipped_special_access']),
             "summary/timestamp": datetime.now().isoformat(),
+            # New comprehensive statistics
+            "summary/total_bytes_downloaded": all_results['total_bytes_downloaded'],
+            "summary/total_bytes_extracted": all_results['total_bytes_extracted'],
+            "summary/total_extracted_files": all_results['total_extracted_files'],
+            "summary/total_directory_size": all_results['total_directory_size'],
+            "summary/total_files_in_directories": all_results['total_files_in_directories'],
+            "summary/total_images": all_results['total_images'],
+            # Human-readable versions
+            "summary/total_downloaded_gb": all_results['total_bytes_downloaded'] / (1024**3),
+            "summary/total_extracted_gb": all_results['total_bytes_extracted'] / (1024**3),
+            "summary/total_storage_gb": all_results['total_directory_size'] / (1024**3),
         }
 
         log_to_wandb(wandb_run, final_metrics)
@@ -878,11 +1029,20 @@ def download_all_datasets(data_root: str = "data", wandb_run: Optional[object] =
                     ds_result.get("skipped", 0),
                     total_files,
                     f"{success_rate:.1f}%",
-                    config.get("size_estimate", "Unknown")
+                    format_bytes(ds_result.get("downloaded_bytes", 0)),
+                    format_bytes(ds_result.get("extracted_bytes", 0)),
+                    ds_result.get("extracted_files", 0),
+                    format_bytes(ds_result.get("total_directory_size", 0)),
+                    ds_result.get("total_files_in_directory", 0),
+                    ds_result.get("image_count", 0),
                 ])
 
             table = wandb.Table(
-                columns=["Dataset", "Status", "Downloaded", "Failed", "Skipped", "Total", "Success Rate", "Est. Size"],
+                columns=[
+                    "Dataset", "Status", "Downloaded", "Failed", "Skipped", "Total",
+                    "Success Rate", "Downloaded Size", "Extracted Size", "Extracted Files",
+                    "Total Dir Size", "Total Files", "Images"
+                ],
                 data=dataset_table_data
             )
             wandb.log({"dataset_summary_table": table})
@@ -915,6 +1075,20 @@ def print_final_summary(results: Dict):
         success_rate = (results['total_files_downloaded'] /
                        (results['total_files_downloaded'] + results['total_files_failed'])) * 100 if (results['total_files_downloaded'] + results['total_files_failed']) > 0 else 0
         print(f"  Success Rate: {success_rate:.1f}%")
+
+    print("")
+    print("=" * 80)
+    print("DATA SIZE & EXTRACTION STATISTICS")
+    print("=" * 80)
+    print(f"  Total Downloaded:        {format_bytes(results.get('total_bytes_downloaded', 0))}")
+    print(f"  Total Extracted:         {format_bytes(results.get('total_bytes_extracted', 0))}")
+    print(f"  Extracted Files:         {results.get('total_extracted_files', 0)}")
+    print(f"  Total Storage Used:      {format_bytes(results.get('total_directory_size', 0))}")
+    print(f"  Total Files in Dirs:     {results.get('total_files_in_directories', 0)}")
+    print(f"  Total Images Found:      {results.get('total_images', 0)}")
+    print("")
+    duration = results.get('duration_seconds', 0)
+    print(f"  Total Duration:          {int(duration // 60)}m {int(duration % 60)}s")
 
     print("")
     print("=" * 80)
@@ -976,6 +1150,23 @@ def print_final_summary(results: Dict):
                 if failed > 0:
                     success_rate = (downloaded / (downloaded + failed)) * 100 if (downloaded + failed) > 0 else 0
                     print(f"    - Success Rate: {success_rate:.1f}%")
+
+                # Show size statistics
+                downloaded_bytes = details.get("downloaded_bytes", 0)
+                extracted_bytes = details.get("extracted_bytes", 0)
+                extracted_files = details.get("extracted_files", 0)
+                total_dir_size = details.get("total_directory_size", 0)
+                total_files = details.get("total_files_in_directory", 0)
+                image_count = details.get("image_count", 0)
+
+                if downloaded_bytes > 0:
+                    print(f"  Data Size:")
+                    print(f"    - Downloaded:     {format_bytes(downloaded_bytes)}")
+                    if extracted_bytes > 0:
+                        print(f"    - Extracted:      {format_bytes(extracted_bytes)} ({extracted_files} files)")
+                    print(f"    - Total in Dir:   {format_bytes(total_dir_size)} ({total_files} files)")
+                    if image_count > 0:
+                        print(f"    - Images Found:   {image_count}")
 
                 # Show specific failures
                 if failed > 0:
@@ -1072,6 +1263,153 @@ def print_status(data_root: str = "data"):
     print("=" * 70)
 
 
+def print_comprehensive_stats(data_root: str = "data"):
+    """Print comprehensive statistics about downloaded datasets."""
+    print("")
+    print("#" * 80)
+    print("# COMPREHENSIVE DATASET STATISTICS")
+    print("#" * 80)
+
+    # Aggregate statistics
+    total_datasets_present = 0
+    total_datasets_missing = 0
+    total_size = 0
+    total_files = 0
+    total_images = 0
+
+    dataset_stats = []
+
+    # Analyze each dataset
+    for ds_name, config in DATASET_CONFIGS.items():
+        output_dir = os.path.join(data_root, os.path.basename(config["output_dir"]))
+
+        if os.path.exists(output_dir) and len(os.listdir(output_dir)) > 0:
+            dir_size, file_count = get_dir_size(output_dir)
+            image_count = count_images_in_dir(output_dir)
+
+            total_datasets_present += 1
+            total_size += dir_size
+            total_files += file_count
+            total_images += image_count
+
+            dataset_stats.append({
+                "name": config["name"],
+                "status": "present",
+                "path": output_dir,
+                "size": dir_size,
+                "files": file_count,
+                "images": image_count,
+                "type": config.get("type", "unknown"),
+            })
+        else:
+            total_datasets_missing += 1
+            dataset_stats.append({
+                "name": config["name"],
+                "status": "missing",
+                "path": output_dir,
+                "size": 0,
+                "files": 0,
+                "images": 0,
+                "type": config.get("type", "unknown"),
+            })
+
+    # Print overall summary
+    print("")
+    print("=" * 80)
+    print("OVERALL SUMMARY")
+    print("=" * 80)
+    print(f"  Datasets Present:    {total_datasets_present}/{len(DATASET_CONFIGS)}")
+    print(f"  Datasets Missing:    {total_datasets_missing}/{len(DATASET_CONFIGS)}")
+    print(f"  Total Storage Used:  {format_bytes(total_size)}")
+    print(f"  Total Files:         {total_files}")
+    print(f"  Total Images:        {total_images}")
+
+    # Print by category
+    print("")
+    print("=" * 80)
+    print("STATISTICS BY DATASET TYPE")
+    print("=" * 80)
+
+    types = {}
+    for stat in dataset_stats:
+        ds_type = stat["type"]
+        if ds_type not in types:
+            types[ds_type] = {
+                "count": 0,
+                "size": 0,
+                "files": 0,
+                "images": 0,
+            }
+        if stat["status"] == "present":
+            types[ds_type]["count"] += 1
+            types[ds_type]["size"] += stat["size"]
+            types[ds_type]["files"] += stat["files"]
+            types[ds_type]["images"] += stat["images"]
+
+    for ds_type, stats in types.items():
+        if stats["count"] > 0:
+            print(f"\n  {ds_type.upper()}:")
+            print(f"    Datasets:  {stats['count']}")
+            print(f"    Size:      {format_bytes(stats['size'])}")
+            print(f"    Files:     {stats['files']}")
+            print(f"    Images:    {stats['images']}")
+
+    # Print detailed per-dataset stats
+    print("")
+    print("=" * 80)
+    print("DETAILED STATISTICS PER DATASET")
+    print("=" * 80)
+
+    for stat in dataset_stats:
+        print("")
+        print(f"┌{'─' * 78}┐")
+        print(f"│ {stat['name']:<76} │")
+        print(f"└{'─' * 78}┘")
+
+        if stat["status"] == "present":
+            print(f"  Status:       ✓ PRESENT")
+            print(f"  Location:     {stat['path']}")
+            print(f"  Storage Used: {format_bytes(stat['size'])}")
+            print(f"  Total Files:  {stat['files']}")
+            if stat['images'] > 0:
+                print(f"  Images:       {stat['images']}")
+            print(f"  Type:         {stat['type']}")
+
+            # Check for specific file types
+            if os.path.exists(stat['path']):
+                json_files = len([f for f in os.listdir(stat['path']) if f.endswith('.json')])
+                tsv_files = len([f for f in os.listdir(stat['path']) if f.endswith('.tsv')])
+                parquet_files = len([f for f in os.listdir(stat['path']) if f.endswith('.parquet')])
+
+                if json_files > 0:
+                    print(f"  JSON files:   {json_files}")
+                if tsv_files > 0:
+                    print(f"  TSV files:    {tsv_files}")
+                if parquet_files > 0:
+                    print(f"  Parquet files: {parquet_files}")
+        else:
+            print(f"  Status:       ✗ MISSING")
+            print(f"  Location:     {stat['path']}")
+            print(f"  Type:         {stat['type']}")
+
+    # Print special access datasets
+    print("")
+    print("=" * 80)
+    print("DATASETS REQUIRING SPECIAL ACCESS")
+    print("=" * 80)
+    for ds_name, config in SPECIAL_ACCESS_DATASETS.items():
+        print(f"\n  ⊘ {config['name']}")
+        print(f"      Reason:       {config['reason']}")
+        print(f"      Instructions: {config['instructions']}")
+        print(f"      Note:         {config.get('note', 'Manual setup required')}")
+
+    print("")
+    print("#" * 80)
+    print("# Use 'python scripts/download_datasets.py --all' to download missing datasets")
+    print("#" * 80)
+    print("")
+
+
 def create_dataset_config(data_root: str = "data", output_path: str = "configs/datasets/data_config.yaml"):
     """Create YAML configuration file for dataset paths."""
     try:
@@ -1129,6 +1467,9 @@ Examples:
 
   Check current status:
     python scripts/download_datasets.py --status
+
+  View comprehensive statistics (sizes, files, images, etc.):
+    python scripts/download_datasets.py --stats
         """
     )
 
@@ -1155,6 +1496,11 @@ Examples:
         help="Print current dataset download status"
     )
     parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="Print comprehensive statistics about downloaded datasets (size, files, images, etc.)"
+    )
+    parser.add_argument(
         "--create-config",
         action="store_true",
         help="Create/update dataset configuration file"
@@ -1176,6 +1522,10 @@ def main():
 
     if args.status:
         print_status(args.data_root)
+        return
+
+    if args.stats:
+        print_comprehensive_stats(args.data_root)
         return
 
     if args.create_config:
@@ -1205,6 +1555,12 @@ def main():
                 "total_files_downloaded": 0,
                 "total_files_failed": 0,
                 "total_files_skipped": 0,
+                "total_bytes_downloaded": 0,
+                "total_bytes_extracted": 0,
+                "total_extracted_files": 0,
+                "total_directory_size": 0,
+                "total_files_in_directories": 0,
+                "total_images": 0,
                 "start_time": time.time(),
             }
 
@@ -1221,9 +1577,17 @@ def main():
                     continue
 
                 result = download_dataset(dataset_name, args.data_root, wandb_run)
+
+                # Aggregate all statistics
                 results["total_files_downloaded"] += result.get("downloaded", 0)
                 results["total_files_failed"] += result.get("failed", 0)
                 results["total_files_skipped"] += result.get("skipped", 0)
+                results["total_bytes_downloaded"] += result.get("downloaded_bytes", 0)
+                results["total_bytes_extracted"] += result.get("extracted_bytes", 0)
+                results["total_extracted_files"] += result.get("extracted_files", 0)
+                results["total_directory_size"] += result.get("total_directory_size", 0)
+                results["total_files_in_directories"] += result.get("total_files_in_directory", 0)
+                results["total_images"] += result.get("image_count", 0)
 
                 if result.get("failed", 0) == 0:
                     results["downloaded_datasets"].append(dataset_name)
@@ -1249,6 +1613,16 @@ def main():
                     "summary/overall_success_rate": overall_success_rate,
                     "summary/duration_seconds": results['duration_seconds'],
                     "summary/datasets_requested": len(args.datasets),
+                    # Comprehensive statistics
+                    "summary/total_bytes_downloaded": results['total_bytes_downloaded'],
+                    "summary/total_bytes_extracted": results['total_bytes_extracted'],
+                    "summary/total_extracted_files": results['total_extracted_files'],
+                    "summary/total_directory_size": results['total_directory_size'],
+                    "summary/total_files_in_directories": results['total_files_in_directories'],
+                    "summary/total_images": results['total_images'],
+                    "summary/total_downloaded_gb": results['total_bytes_downloaded'] / (1024**3),
+                    "summary/total_extracted_gb": results['total_bytes_extracted'] / (1024**3),
+                    "summary/total_storage_gb": results['total_directory_size'] / (1024**3),
                 })
 
             print_final_summary(results)
