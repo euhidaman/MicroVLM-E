@@ -1512,6 +1512,116 @@ def download_all_datasets(data_root: str = "data", wandb_run: Optional[object] =
                 "progress/percentage": progress_pct,
             })
 
+    # =========================================================================
+    # STEP 2: EXTRACT ALL ARCHIVES AUTOMATICALLY
+    # =========================================================================
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("STEP 2: EXTRACTING ALL ARCHIVES")
+    logger.info("=" * 70)
+    logger.info("")
+
+    extraction_stats = {
+        "total_archives": 0,
+        "extracted": 0,
+        "already_extracted": 0,
+        "failed": 0,
+    }
+
+    for ds_name, config in DATASET_CONFIGS.items():
+        output_dir = os.path.join(data_root, os.path.basename(config["output_dir"]))
+
+        if not os.path.exists(output_dir):
+            continue
+
+        # Find all archives
+        archives = [f for f in os.listdir(output_dir) if f.endswith(ARCHIVE_EXTENSIONS)]
+
+        if not archives:
+            continue
+
+        extraction_stats["total_archives"] += len(archives)
+        logger.info(f"Processing {config['name']} - found {len(archives)} archive(s)")
+
+        for archive in archives:
+            archive_path = os.path.join(output_dir, archive)
+
+            # Check if already extracted
+            marker = load_extraction_marker(output_dir, archive)
+            if marker:
+                logger.info(f"  Already extracted: {archive}")
+                extraction_stats["already_extracted"] += 1
+                continue
+
+            logger.info(f"  Extracting: {archive}")
+            success, error, extracted_size, extracted_files = extract_archive(archive_path, output_dir)
+
+            if success:
+                extraction_stats["extracted"] += 1
+                logger.info(f"    ✓ Extracted {extracted_files} files ({format_bytes(extracted_size)})")
+            else:
+                extraction_stats["failed"] += 1
+                logger.error(f"    ✗ Failed: {error}")
+
+    logger.info("")
+    logger.info(f"Extraction Summary: {extraction_stats['extracted']} extracted, "
+                f"{extraction_stats['already_extracted']} already done, "
+                f"{extraction_stats['failed']} failed")
+    logger.info("")
+
+    # =========================================================================
+    # STEP 3: DOWNLOAD IMAGES FROM TSV/PARQUET FILES AUTOMATICALLY
+    # =========================================================================
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("STEP 3: DOWNLOADING IMAGES FROM TSV/PARQUET FILES")
+    logger.info("=" * 70)
+    logger.info("")
+
+    image_download_results = {}
+
+    # CC3M
+    cc3m_dir = os.path.join(data_root, "cc3m")
+    if os.path.exists(cc3m_dir):
+        tsv_files = [f for f in os.listdir(cc3m_dir) if f.endswith('.tsv')]
+        if tsv_files:
+            logger.info("Processing CC3M images...")
+            cc_success, cc_stats = setup_cc3m_with_img2dataset(cc3m_dir, force=FORCE_IMAGE_DOWNLOAD)
+            image_download_results["cc3m"] = {"success": cc_success, "stats": cc_stats}
+            all_results["total_image_download_attempts"] += cc_stats.get("attempts", 0)
+            all_results["total_image_download_successes"] += cc_stats.get("successes", 0)
+            all_results["total_image_download_failures"] += cc_stats.get("failures", 0)
+        else:
+            logger.info("CC3M: No TSV files found, skipping image download")
+    else:
+        logger.info("CC3M: Directory not found, skipping")
+
+    # LAION
+    laion_dir = os.path.join(data_root, "laion")
+    if os.path.exists(laion_dir):
+        # Find parquet files
+        parquet_files = []
+        for root, dirs, files in os.walk(laion_dir):
+            for file in files:
+                if file.endswith('.parquet'):
+                    parquet_files.append(os.path.join(root, file))
+
+        if parquet_files:
+            logger.info(f"Processing LAION images ({len(parquet_files)} parquet files)...")
+            laion_success, laion_stats = setup_laion_with_img2dataset(laion_dir, force=FORCE_IMAGE_DOWNLOAD)
+            image_download_results["laion"] = {"success": laion_success, "stats": laion_stats}
+            all_results["total_image_download_attempts"] += laion_stats.get("attempts", 0)
+            all_results["total_image_download_successes"] += laion_stats.get("successes", 0)
+            all_results["total_image_download_failures"] += laion_stats.get("failures", 0)
+        else:
+            logger.info("LAION: No parquet files found, skipping image download")
+    else:
+        logger.info("LAION: Directory not found, skipping")
+
+    logger.info("")
+    logger.info("Image download phase completed")
+    logger.info("")
+
     # Calculate final statistics
     all_results["end_time"] = time.time()
     all_results["duration_seconds"] = all_results["end_time"] - all_results["start_time"]
@@ -2364,8 +2474,18 @@ def extract_all_archives(data_root: str = "data"):
             success, error, extracted_size, extracted_files = extract_archive(archive_path, output_dir)
 
             if success:
+                # Save marker
                 save_extraction_marker(output_dir, archive, extracted_files, extracted_size)
-                logger.info(f"    ✓ Extracted {extracted_files} files ({format_bytes(extracted_size)})")
+
+                # Show what was extracted
+                if extracted_files == 0:
+                    # Files were already extracted, show current state
+                    current_size, current_files = get_dir_size(output_dir)
+                    logger.info(f"    ✓ Extraction completed (files were already extracted)")
+                    logger.info(f"    Current directory state: {current_files} files ({format_bytes(current_size)})")
+                else:
+                    logger.info(f"    ✓ Extracted {extracted_files} files ({format_bytes(extracted_size)})")
+
                 total_extracted += 1
             else:
                 logger.error(f"    ✗ Failed: {error}")
@@ -2375,6 +2495,35 @@ def extract_all_archives(data_root: str = "data"):
     logger.info("=" * 80)
     logger.info(f"Extraction complete: {total_extracted} successful, {total_failed} failed")
     logger.info("=" * 80)
+    logger.info("")
+
+    # Show verification
+    logger.info("VERIFICATION - Checking extracted contents:")
+    logger.info("")
+
+    key_datasets = [
+        ("coco", ["train2017", "val2017", "annotations"]),
+        ("vqa", ["v2_OpenEnded_mscoco_train2017_questions.json", "v2_OpenEnded_mscoco_val2017_questions.json"]),
+        ("gqa", ["images"]),
+    ]
+
+    for ds_key, expected_items in key_datasets:
+        ds_dir = os.path.join(data_root, ds_key)
+        if os.path.exists(ds_dir):
+            logger.info(f"  {ds_key}:")
+            for item in expected_items:
+                item_path = os.path.join(ds_dir, item)
+                if os.path.exists(item_path):
+                    if os.path.isdir(item_path):
+                        size, files = get_dir_size(item_path)
+                        images = count_images_in_dir(item_path)
+                        logger.info(f"    ✓ {item}/: {files} files, {images} images, {format_bytes(size)}")
+                    else:
+                        size = get_file_size(item_path)
+                        logger.info(f"    ✓ {item}: {format_bytes(size)}")
+                else:
+                    logger.info(f"    ✗ {item}: NOT FOUND")
+
     logger.info("")
 
 
