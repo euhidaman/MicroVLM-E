@@ -749,29 +749,25 @@ def extract_archive(archive_path: str, output_dir: str) -> Tuple[bool, str, int,
         logger.info(f"Extracting: {archive_name}")
         os.makedirs(output_dir, exist_ok=True)
 
-        extracted_files = 0
-        extracted_size = 0
+        # Get size/count BEFORE extraction to calculate delta
+        size_before, files_before = get_dir_size(output_dir)
 
         if archive_path.endswith(".zip"):
             with zipfile.ZipFile(archive_path, "r") as zip_ref:
-                members = [m for m in zip_ref.infolist() if not m.is_dir()]
-                extracted_files = len(members)
-                extracted_size = sum(m.file_size for m in members)
                 zip_ref.extractall(output_dir)
         elif archive_path.endswith((".tar.gz", ".tgz")):
             with tarfile.open(archive_path, "r:gz") as tar_ref:
-                members = [m for m in tar_ref.getmembers() if m.isfile()]
-                extracted_files = len(members)
-                extracted_size = sum(m.size for m in members)
                 tar_ref.extractall(output_dir)
         elif archive_path.endswith(".tar"):
             with tarfile.open(archive_path, "r") as tar_ref:
-                members = [m for m in tar_ref.getmembers() if m.isfile()]
-                extracted_files = len(members)
-                extracted_size = sum(m.size for m in members)
                 tar_ref.extractall(output_dir)
         else:
             return False, f"Unknown archive format: {archive_path}", 0, 0
+
+        # Get size/count AFTER extraction to see what was actually extracted
+        size_after, files_after = get_dir_size(output_dir)
+        extracted_size = size_after - size_before
+        extracted_files = files_after - files_before
 
         save_extraction_marker(output_dir, archive_name, extracted_files, extracted_size)
         logger.info(f"Successfully extracted: {archive_name} ({extracted_files} files, {format_bytes(extracted_size)})")
