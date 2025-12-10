@@ -370,6 +370,10 @@ SPECIAL_ACCESS_DATASETS = {
 # RUN COUNTER AND WANDB FUNCTIONS
 # =============================================================================
 
+# Constants for wandb logging
+RUN_COUNTER_FILE = ".run_counter"
+WANDB_PROJECT = "MicroVLM-E-datasets-logs"
+
 def get_and_increment_run_counter(counter_file: str = RUN_COUNTER_FILE) -> int:
     """
     Read the current run counter, increment it, and save.
