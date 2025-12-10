@@ -664,15 +664,35 @@ def download_hf_dataset(dataset_name: str, output_dir: str, split: Optional[str]
         return 0, 1, 0
 
     try:
-        logger.info(f"Loading HuggingFace dataset: {dataset_name}")
-
         os.makedirs(output_dir, exist_ok=True)
+
+        # Check if already downloaded
+        output_path = os.path.join(output_dir, "dataset")
+        if os.path.exists(output_path):
+            # Check if it has actual data
+            existing_size, existing_files = get_dir_size(output_path)
+            if existing_files > 0:
+                logger.info(f"✓ HF dataset already exists: {dataset_name}")
+                logger.info(f"  Location: {output_path}")
+                logger.info(f"  Size: {format_bytes(existing_size)}, Files: {existing_files}")
+                return 1, 0, existing_size
+
+        # Also check for hf_snapshot directory
+        snapshot_dir = os.path.join(output_dir, "hf_snapshot")
+        if os.path.exists(snapshot_dir):
+            existing_size, existing_files = get_dir_size(snapshot_dir)
+            if existing_files > 0:
+                logger.info(f"✓ HF dataset snapshot already exists: {dataset_name}")
+                logger.info(f"  Location: {snapshot_dir}")
+                logger.info(f"  Size: {format_bytes(existing_size)}, Files: {existing_files}")
+                return 1, 0, existing_size
+
+        logger.info(f"Loading HuggingFace dataset: {dataset_name}")
 
         # Load dataset
         dataset = load_dataset(dataset_name, split=split, cache_dir=output_dir)
 
         # Save to disk in a standardized format
-        output_path = os.path.join(output_dir, "dataset")
         dataset.save_to_disk(output_path)
 
         # Get size
@@ -756,28 +776,38 @@ def extract_archive(archive_path: str, output_dir: str) -> Tuple[bool, str, int,
         logger.info(f"Extracting: {archive_name}")
         os.makedirs(output_dir, exist_ok=True)
 
-        # Get size/count BEFORE extraction to calculate delta
-        size_before, files_before = get_dir_size(output_dir)
+        extracted_files = 0
+        extracted_size = 0
 
         if archive_path.endswith(".zip"):
             with zipfile.ZipFile(archive_path, "r") as zip_ref:
+                # Count files and size from archive
+                for info in zip_ref.infolist():
+                    if not info.is_dir():
+                        extracted_files += 1
+                        extracted_size += info.file_size
                 zip_ref.extractall(output_dir)
+
         elif archive_path.endswith((".tar.gz", ".tgz")):
             with tarfile.open(archive_path, "r:gz") as tar_ref:
+                for member in tar_ref.getmembers():
+                    if member.isfile():
+                        extracted_files += 1
+                        extracted_size += member.size
                 tar_ref.extractall(output_dir)
+
         elif archive_path.endswith(".tar"):
             with tarfile.open(archive_path, "r") as tar_ref:
+                for member in tar_ref.getmembers():
+                    if member.isfile():
+                        extracted_files += 1
+                        extracted_size += member.size
                 tar_ref.extractall(output_dir)
         else:
             return False, f"Unknown archive format: {archive_path}", 0, 0
 
-        # Get size/count AFTER extraction to see what was actually extracted
-        size_after, files_after = get_dir_size(output_dir)
-        extracted_size = size_after - size_before
-        extracted_files = files_after - files_before
-
         save_extraction_marker(output_dir, archive_name, extracted_files, extracted_size)
-        logger.info(f"Successfully extracted: {archive_name} ({extracted_files} files, {format_bytes(extracted_size)})")
+        logger.info(f"✓ Extracted: {archive_name} ({extracted_files} files, {format_bytes(extracted_size)})")
         return True, "", extracted_size, extracted_files
 
     except zipfile.BadZipFile as e:
@@ -796,9 +826,171 @@ def extract_archive(archive_path: str, output_dir: str) -> Tuple[bool, str, int,
         return False, error_msg, 0, 0
 
 
+def download_single_image(args: Tuple[str, str, str, int]) -> Tuple[bool, str, int]:
+    """
+    Download a single image from URL.
+
+    Args:
+        args: Tuple of (url, output_path, caption, timeout)
+
+    Returns:
+        Tuple of (success, error_message, file_size)
+    """
+    url, output_path, caption, timeout = args
+
+    try:
+        # Skip if already exists
+        if os.path.exists(output_path):
+            return True, "", os.path.getsize(output_path)
+
+        response = requests.get(url, timeout=timeout, stream=True)
+        response.raise_for_status()
+
+        # Check content type
+        content_type = response.headers.get('content-type', '')
+        if not content_type.startswith('image/'):
+            return False, f"Not an image: {content_type}", 0
+
+        # Save image
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        # Save caption alongside image
+        caption_path = output_path.rsplit('.', 1)[0] + '.txt'
+        with open(caption_path, 'w', encoding='utf-8') as f:
+            f.write(caption)
+
+        return True, "", os.path.getsize(output_path)
+
+    except requests.exceptions.Timeout:
+        return False, "Timeout", 0
+    except requests.exceptions.HTTPError as e:
+        return False, f"HTTP {e.response.status_code}", 0
+    except Exception as e:
+        return False, str(e)[:50], 0
+
+
+def download_images_from_tsv(tsv_path: str, output_dir: str, max_images: int = None,
+                              num_workers: int = 8, timeout: int = 10) -> Dict:
+    """
+    Download images from a TSV file containing URLs and captions.
+
+    Args:
+        tsv_path: Path to TSV file with 'url' and 'caption' columns
+        output_dir: Directory to save images
+        max_images: Maximum number of images to download (None for all)
+        num_workers: Number of parallel download workers
+        timeout: Timeout for each download in seconds
+
+    Returns:
+        Statistics dictionary
+    """
+    import concurrent.futures
+
+    stats = {
+        "total": 0,
+        "success": 0,
+        "failed": 0,
+        "skipped": 0,
+        "total_size": 0,
+    }
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Read TSV file
+    logger.info(f"Reading TSV file: {tsv_path}")
+    urls_and_captions = []
+
+    try:
+        with open(tsv_path, 'r', encoding='utf-8') as f:
+            # Skip header if present
+            first_line = f.readline().strip()
+            if not first_line.startswith('http'):
+                # It's a header, continue reading
+                pass
+            else:
+                # No header, parse first line
+                parts = first_line.split('\t')
+                if len(parts) >= 2:
+                    urls_and_captions.append((parts[0], parts[1]))
+
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split('\t')
+                if len(parts) >= 2:
+                    urls_and_captions.append((parts[0], parts[1]))
+                    if max_images and len(urls_and_captions) >= max_images:
+                        break
+    except Exception as e:
+        logger.error(f"Failed to read TSV file: {e}")
+        return stats
+
+    stats["total"] = len(urls_and_captions)
+    logger.info(f"Found {stats['total']} URLs to download")
+
+    if stats["total"] == 0:
+        return stats
+
+    # Prepare download tasks
+    download_tasks = []
+    for idx, (url, caption) in enumerate(urls_and_captions):
+        # Create filename from index
+        ext = '.jpg'  # Default extension
+        filename = f"{idx:08d}{ext}"
+        output_path = os.path.join(output_dir, filename)
+
+        # Skip if already downloaded
+        if os.path.exists(output_path):
+            stats["skipped"] += 1
+            stats["success"] += 1
+            continue
+
+        download_tasks.append((url, output_path, caption, timeout))
+
+    if not download_tasks:
+        logger.info(f"All {stats['total']} images already downloaded")
+        return stats
+
+    logger.info(f"Downloading {len(download_tasks)} images ({stats['skipped']} already exist)...")
+
+    # Download in parallel
+    success_count = stats["skipped"]
+    failed_count = 0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(download_single_image, task): task for task in download_tasks}
+
+        with tqdm(total=len(download_tasks), desc="Downloading images") as pbar:
+            for future in concurrent.futures.as_completed(futures):
+                success, error, size = future.result()
+                if success:
+                    success_count += 1
+                    stats["total_size"] += size
+                else:
+                    failed_count += 1
+                pbar.update(1)
+                pbar.set_postfix({"success": success_count, "failed": failed_count})
+
+    stats["success"] = success_count
+    stats["failed"] = failed_count
+
+    # Save stats
+    stats_path = os.path.join(output_dir, "download_stats.json")
+    with open(stats_path, 'w') as f:
+        json.dump(stats, f, indent=2)
+
+    logger.info(f"Download complete: {stats['success']}/{stats['total']} successful, {stats['failed']} failed")
+
+    return stats
+
+
 def setup_cc3m_with_img2dataset(output_dir: str, force: bool = False) -> Tuple[bool, Dict]:
     """
-    Automatically download CC3M images using img2dataset.
+    Download CC3M images from TSV files using custom downloader.
 
     Args:
         output_dir: Directory containing CC3M TSV files
@@ -808,18 +1000,6 @@ def setup_cc3m_with_img2dataset(output_dir: str, force: bool = False) -> Tuple[b
         (success flag, image download stats dict)
     """
     img_stats = {"attempts": 0, "successes": 0, "failures": 0, "details": []}
-
-    # Check if img2dataset is available
-    if not shutil.which("img2dataset"):
-        logger.error("img2dataset not found. Install with: pip install img2dataset")
-        logger.info("")
-        logger.info("=" * 70)
-        logger.info("MANUAL SETUP REQUIRED FOR CC3M")
-        logger.info("=" * 70)
-        logger.info("Install img2dataset: pip install img2dataset")
-        logger.info("Then run the download script again.")
-        logger.info("=" * 70)
-        return False, img_stats
 
     tsv_files = []
 
@@ -838,7 +1018,7 @@ def setup_cc3m_with_img2dataset(output_dir: str, force: bool = False) -> Tuple[b
 
     logger.info("")
     logger.info("=" * 70)
-    logger.info("DOWNLOADING CC3M IMAGES WITH IMG2DATASET")
+    logger.info("DOWNLOADING CC3M IMAGES")
     logger.info("=" * 70)
     logger.info("")
 
@@ -846,94 +1026,165 @@ def setup_cc3m_with_img2dataset(output_dir: str, force: bool = False) -> Tuple[b
     for split_name, tsv_path in tsv_files:
         images_dir = os.path.join(output_dir, f"images_{split_name}")
 
-        # Skip if already downloaded (check for webdataset tar files) unless force is True
+        # Check if already downloaded
         if not force and os.path.exists(images_dir):
-            tar_files = [f for f in os.listdir(images_dir) if f.endswith('.tar')]
-            if len(tar_files) > 0:
-                logger.info(f"CC3M {split_name} images already exist ({len(tar_files)} shards), collecting stats.")
-                split_stats = read_img2dataset_stats(images_dir)
-                merge_img_download_stats(img_stats, split_stats, f"cc3m_{split_name}")
+            existing_images = len([f for f in os.listdir(images_dir) if f.endswith(('.jpg', '.jpeg', '.png', '.webp'))])
+            if existing_images > 100:  # Reasonable threshold
+                logger.info(f"CC3M {split_name} images already exist ({existing_images} images), skipping.")
+                img_stats["successes"] += existing_images
                 continue
-            else:
-                logger.info(f"CC3M {split_name} images directory exists but no tar files found. Will download.")
-        elif force:
-            logger.info(f"Force flag set - will re-download CC3M {split_name} images")
 
         logger.info(f"Downloading CC3M {split_name} images...")
         logger.info(f"Source: {tsv_path}")
         logger.info(f"Output: {images_dir}")
-        logger.info("Note: CC3M has many dead URLs. This may take several hours and expect ~70-80% success rate.")
+        logger.info("Note: CC3M has many dead URLs. Expect ~70-80% success rate.")
 
-        # Run img2dataset
-        cmd = [
-            "img2dataset",
-            "--url_list", tsv_path,
-            "--input_format", "tsv",
-            "--url_col", "url",
-            "--caption_col", "caption",
-            "--output_folder", images_dir,
-            "--image_size", "256",
-            "--processes_count", "16",
-            "--thread_count", "64",
-            "--resize_mode", "center_crop",
-            "--output_format", "webdataset",
-            "--enable_wandb", "False",
-            "--save_additional_columns", "[]",
-        ]
+        # Use custom downloader
+        stats = download_images_from_tsv(
+            tsv_path=tsv_path,
+            output_dir=images_dir,
+            max_images=None,  # Download all
+            num_workers=16,
+            timeout=10,
+        )
 
-        try:
-            logger.info(f"Running: {' '.join(cmd)}")
-            # Run without check so it doesn't fail on partial errors
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        img_stats["attempts"] += stats.get("total", 0)
+        img_stats["successes"] += stats.get("success", 0)
+        img_stats["failures"] += stats.get("failed", 0)
 
-            # Log both stdout and stderr for debugging
-            if result.stdout:
-                logger.info(f"img2dataset stdout (first 1000 chars):")
-                logger.info(result.stdout[:1000])
-
-            if result.stderr:
-                logger.info(f"img2dataset stderr (first 1000 chars):")
-                logger.info(result.stderr[:1000])
-
-            # Check if output directory was created and has files
-            if os.path.exists(images_dir) and len([f for f in os.listdir(images_dir) if f.endswith('.tar')]) > 0:
-                tar_count = len([f for f in os.listdir(images_dir) if f.endswith('.tar')])
-                logger.info(f"✓ Successfully downloaded CC3M {split_name} images - {tar_count} shards created")
-            elif result.returncode == 0:
-                logger.info(f"✓ img2dataset completed for {split_name} with return code 0")
-                # Check if any files were created
-                if os.path.exists(images_dir):
-                    all_files = os.listdir(images_dir)
-                    logger.info(f"Files in output directory: {len(all_files)}")
-                else:
-                    logger.warning(f"⚠ Output directory was not created: {images_dir}")
-            else:
-                logger.warning(f"⚠ img2dataset encountered errors for {split_name}")
-                logger.warning(f"Return code: {result.returncode}")
-                if os.path.exists(images_dir):
-                    all_files = os.listdir(images_dir)
-                    logger.info(f"Files created despite errors: {len(all_files)}")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to run img2dataset for {split_name}: {e}")
-            logger.error(f"Command: {' '.join(cmd)}")
+        if stats.get("success", 0) == 0 and stats.get("total", 0) > 0:
             success = False
-        except Exception as e:
-            logger.error(f"Unexpected error running img2dataset for {split_name}: {e}")
-            logger.error(f"Command: {' '.join(cmd)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            success = False
-
-        split_stats = read_img2dataset_stats(images_dir)
-        merge_img_download_stats(img_stats, split_stats, f"cc3m_{split_name}")
 
     logger.info("=" * 70)
     return success, img_stats
 
 
+def download_images_from_parquet(parquet_path: str, output_dir: str, max_images: int = None,
+                                  num_workers: int = 8, timeout: int = 10,
+                                  url_col: str = "URL", caption_col: str = "TEXT") -> Dict:
+    """
+    Download images from a parquet file containing URLs and captions.
+
+    Args:
+        parquet_path: Path to parquet file
+        output_dir: Directory to save images
+        max_images: Maximum number of images to download (None for all)
+        num_workers: Number of parallel download workers
+        timeout: Timeout for each download in seconds
+        url_col: Column name for URLs
+        caption_col: Column name for captions
+
+    Returns:
+        Statistics dictionary
+    """
+    import concurrent.futures
+
+    stats = {
+        "total": 0,
+        "success": 0,
+        "failed": 0,
+        "skipped": 0,
+        "total_size": 0,
+    }
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Try to read parquet file
+    try:
+        import pyarrow.parquet as pq
+        table = pq.read_table(parquet_path)
+        df = table.to_pandas()
+    except ImportError:
+        try:
+            import pandas as pd
+            df = pd.read_parquet(parquet_path)
+        except ImportError:
+            logger.error("Neither pyarrow nor pandas available. Install with: pip install pyarrow pandas")
+            return stats
+    except Exception as e:
+        logger.error(f"Failed to read parquet file: {e}")
+        return stats
+
+    # Find URL and caption columns (case-insensitive)
+    url_column = None
+    caption_column = None
+
+    for col in df.columns:
+        if col.lower() == url_col.lower():
+            url_column = col
+        if col.lower() == caption_col.lower():
+            caption_column = col
+
+    if url_column is None:
+        logger.error(f"Could not find URL column '{url_col}' in parquet. Available columns: {list(df.columns)}")
+        return stats
+
+    logger.info(f"Using columns: URL='{url_column}', Caption='{caption_column or 'N/A'}'")
+
+    if max_images:
+        df = df.head(max_images)
+
+    stats["total"] = len(df)
+    logger.info(f"Found {stats['total']} URLs to download")
+
+    if stats["total"] == 0:
+        return stats
+
+    # Prepare download tasks
+    download_tasks = []
+    for idx, row in df.iterrows():
+        url = row[url_column]
+        caption = row[caption_column] if caption_column else ""
+
+        ext = '.jpg'
+        filename = f"{idx:08d}{ext}"
+        output_path = os.path.join(output_dir, filename)
+
+        if os.path.exists(output_path):
+            stats["skipped"] += 1
+            stats["success"] += 1
+            continue
+
+        download_tasks.append((url, output_path, caption, timeout))
+
+    if not download_tasks:
+        logger.info(f"All {stats['total']} images already downloaded")
+        return stats
+
+    logger.info(f"Downloading {len(download_tasks)} images ({stats['skipped']} already exist)...")
+
+    success_count = stats["skipped"]
+    failed_count = 0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(download_single_image, task): task for task in download_tasks}
+
+        with tqdm(total=len(download_tasks), desc="Downloading images") as pbar:
+            for future in concurrent.futures.as_completed(futures):
+                success, error, size = future.result()
+                if success:
+                    success_count += 1
+                    stats["total_size"] += size
+                else:
+                    failed_count += 1
+                pbar.update(1)
+                pbar.set_postfix({"success": success_count, "failed": failed_count})
+
+    stats["success"] = success_count
+    stats["failed"] = failed_count
+
+    stats_path = os.path.join(output_dir, "download_stats.json")
+    with open(stats_path, 'w') as f:
+        json.dump(stats, f, indent=2)
+
+    logger.info(f"Download complete: {stats['success']}/{stats['total']} successful, {stats['failed']} failed")
+
+    return stats
+
+
 def setup_laion_with_img2dataset(output_dir: str, force: bool = False) -> Tuple[bool, Dict]:
     """
-    Automatically download LAION images using img2dataset.
+    Download LAION images from parquet files using custom downloader.
 
     Args:
         output_dir: Directory containing LAION parquet files
@@ -944,138 +1195,53 @@ def setup_laion_with_img2dataset(output_dir: str, force: bool = False) -> Tuple[
     """
     img_stats = {"attempts": 0, "successes": 0, "failures": 0, "details": []}
 
-    # Check if img2dataset is available
-    if not shutil.which("img2dataset"):
-        logger.error("img2dataset not found. Install with: pip install img2dataset")
-        logger.info("")
-        logger.info("=" * 70)
-        logger.info("MANUAL SETUP REQUIRED FOR LAION")
-        logger.info("=" * 70)
-        logger.info("Install img2dataset: pip install img2dataset")
-        logger.info("Then run the download script again.")
-        logger.info("=" * 70)
-        return False, img_stats
-
-    # Check for parquet files or HF dataset directory
+    # Check for parquet files
     parquet_files = []
     if os.path.exists(output_dir):
-        parquet_files = [f for f in os.listdir(output_dir) if f.endswith('.parquet')]
-
-        # Also check in subdirectories (HF datasets format)
         for root, dirs, files in os.walk(output_dir):
             for file in files:
                 if file.endswith('.parquet'):
                     parquet_files.append(os.path.join(root, file))
 
     if not parquet_files:
-        # Check if we have a HF dataset directory
-        dataset_dir = os.path.join(output_dir, "dataset")
-        if os.path.exists(dataset_dir):
-            logger.info("Found HuggingFace dataset directory. Searching for parquet files...")
-            for root, dirs, files in os.walk(dataset_dir):
-                for file in files:
-                    if file.endswith('.parquet'):
-                        parquet_files.append(os.path.join(root, file))
-
-        if not parquet_files:
-            logger.warning("No LAION parquet files found. The dataset may need to be downloaded from HuggingFace first.")
-            logger.info("The dataset should have been downloaded using the HF datasets library.")
-            logger.info("If this failed, you may need to manually download the dataset or use a different LAION subset.")
-            return False, img_stats
+        logger.warning("No LAION parquet files found.")
+        return False, img_stats
 
     logger.info("")
     logger.info("=" * 70)
-    logger.info("DOWNLOADING LAION IMAGES WITH IMG2DATASET")
+    logger.info("DOWNLOADING LAION IMAGES")
     logger.info("=" * 70)
+    logger.info(f"Found {len(parquet_files)} parquet file(s)")
     logger.info("")
 
     images_dir = os.path.join(output_dir, "images")
 
-    # Skip if already downloaded (check for webdataset tar files) unless force is True
+    # Check if already downloaded
     if not force and os.path.exists(images_dir):
-        tar_files = [f for f in os.listdir(images_dir) if f.endswith('.tar')]
-        if len(tar_files) > 0:
-            logger.info(f"LAION images already exist ({len(tar_files)} shards), collecting stats.")
-            split_stats = read_img2dataset_stats(images_dir)
-            merge_img_download_stats(img_stats, split_stats, "laion_images")
+        existing_images = len([f for f in os.listdir(images_dir) if f.endswith(('.jpg', '.jpeg', '.png', '.webp'))])
+        if existing_images > 100:
+            logger.info(f"LAION images already exist ({existing_images} images), skipping.")
+            img_stats["successes"] = existing_images
             return True, img_stats
-        else:
-            logger.info(f"LAION images directory exists but no tar files found. Will download.")
-    elif force:
-        logger.info(f"Force flag set - will re-download LAION images")
 
     success = True
     for parquet_file in parquet_files:
-        # Handle both absolute and relative paths
-        if os.path.isabs(parquet_file):
-            parquet_path = parquet_file
-        else:
-            parquet_path = os.path.join(output_dir, parquet_file)
+        logger.info(f"Processing: {os.path.basename(parquet_file)}")
 
-        logger.info(f"Downloading LAION images from: {os.path.basename(parquet_path)}")
-        logger.info(f"Full path: {parquet_path}")
-        logger.info(f"Output: {images_dir}")
-        logger.info("Note: This may take several hours. Some URLs may be dead.")
+        stats = download_images_from_parquet(
+            parquet_path=parquet_file,
+            output_dir=images_dir,
+            max_images=None,
+            num_workers=16,
+            timeout=10,
+        )
 
-        # Run img2dataset
-        cmd = [
-            "img2dataset",
-            "--url_list", parquet_path,
-            "--input_format", "parquet",
-            "--url_col", "URL",  # Standard LAION column name
-            "--caption_col", "TEXT",  # Standard LAION column name
-            "--output_folder", images_dir,
-            "--image_size", "256",
-            "--processes_count", "16",
-            "--thread_count", "64",
-            "--resize_mode", "center_crop",
-            "--output_format", "webdataset",
-            "--enable_wandb", "False",
-        ]
+        img_stats["attempts"] += stats.get("total", 0)
+        img_stats["successes"] += stats.get("success", 0)
+        img_stats["failures"] += stats.get("failed", 0)
 
-        try:
-            logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True)
-
-            # Log both stdout and stderr for debugging
-            if result.stdout:
-                logger.info(f"img2dataset stdout (first 1000 chars):")
-                logger.info(result.stdout[:1000])
-
-            if result.stderr:
-                logger.info(f"img2dataset stderr (first 1000 chars):")
-                logger.info(result.stderr[:1000])
-
-            # Check if output directory was created and has files
-            if os.path.exists(images_dir) and len([f for f in os.listdir(images_dir) if f.endswith('.tar')]) > 0:
-                tar_count = len([f for f in os.listdir(images_dir) if f.endswith('.tar')])
-                logger.info(f"✓ Successfully downloaded LAION images - {tar_count} shards created")
-            elif result.returncode == 0:
-                logger.info(f"✓ img2dataset completed for LAION with return code 0")
-                # Check if any files were created
-                if os.path.exists(images_dir):
-                    all_files = os.listdir(images_dir)
-                    logger.info(f"Files in output directory: {len(all_files)}")
-                else:
-                    logger.warning(f"⚠ Output directory was not created: {images_dir}")
-            else:
-                logger.warning(f"⚠ img2dataset encountered errors")
-                logger.warning(f"Return code: {result.returncode}")
-                if os.path.exists(images_dir):
-                    all_files = os.listdir(images_dir)
-                    logger.info(f"Files created despite errors: {len(all_files)}")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to run img2dataset for {os.path.basename(parquet_path)}: {e}")
-            logger.error(f"Command: {' '.join(cmd)}")
+        if stats.get("success", 0) == 0 and stats.get("total", 0) > 0:
             success = False
-        except Exception as e:
-            logger.error(f"Unexpected error running img2dataset for {os.path.basename(parquet_path)}: {e}")
-            logger.error(f"Command: {' '.join(cmd)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            success = False
-
-        merge_img_download_stats(img_stats, read_img2dataset_stats(images_dir), os.path.basename(parquet_path))
 
     logger.info("=" * 70)
     return success, img_stats
@@ -1439,11 +1605,42 @@ def download_all_datasets(data_root: str = "data", wandb_run: Optional[object] =
     logger.info("")
     logger.info("#" * 70)
     logger.info("# STARTING FULL DATASET DOWNLOAD")
-    logger.info("# No failsafe checks - attempting all downloads")
+    logger.info("# This will: 1) Download files, 2) Extract archives, 3) Download images from TSV/parquet")
     logger.info("#" * 70)
 
-    # First, log all special access datasets that will be skipped
+    # Check for existing TSV/parquet files first
     logger.info("")
+    logger.info("=" * 70)
+    logger.info("CHECKING FOR EXISTING FILES TO PROCESS")
+    logger.info("=" * 70)
+
+    cc3m_dir = os.path.join(data_root, "cc3m")
+    laion_dir = os.path.join(data_root, "laion")
+
+    existing_tsv_count = 0
+    existing_parquet_count = 0
+    existing_archives = 0
+
+    if os.path.exists(cc3m_dir):
+        existing_tsv_count = len([f for f in os.listdir(cc3m_dir) if f.endswith('.tsv')])
+
+    if os.path.exists(laion_dir):
+        for root, dirs, files in os.walk(laion_dir):
+            existing_parquet_count += len([f for f in files if f.endswith('.parquet')])
+
+    for ds_name, config in DATASET_CONFIGS.items():
+        output_dir = os.path.join(data_root, os.path.basename(config["output_dir"]))
+        if os.path.exists(output_dir):
+            existing_archives += len([f for f in os.listdir(output_dir) if f.endswith(ARCHIVE_EXTENSIONS)])
+
+    logger.info(f"  Found {existing_tsv_count} TSV files (CC3M)")
+    logger.info(f"  Found {existing_parquet_count} parquet files (LAION)")
+    logger.info(f"  Found {existing_archives} compressed archives")
+    if existing_tsv_count > 0 or existing_parquet_count > 0 or existing_archives > 0:
+        logger.info("  These will be processed after downloads complete")
+    logger.info("")
+
+    # Log all special access datasets that will be skipped
     logger.info("=" * 70)
     logger.info("DATASETS REQUIRING SPECIAL ACCESS (will be skipped):")
     logger.info("=" * 70)
@@ -2116,7 +2313,6 @@ def get_img2dataset_stats(output_dir: str) -> Dict:
         stats_file = os.path.join(output_dir, "stats.json")
         if os.path.exists(stats_file):
             try:
-                import json
                 with open(stats_file, 'r') as f:
                     img2dataset_stats = json.load(f)
                     stats["successful_downloads"] = img2dataset_stats.get("successful", 0)
@@ -2129,10 +2325,24 @@ def get_img2dataset_stats(output_dir: str) -> Dict:
         for subdir in ["images_training", "images_validation", "images"]:
             subdir_path = os.path.join(output_dir, subdir)
             if os.path.exists(subdir_path):
-                stats["has_img2dataset_output"] = True
-                # Count images or webdataset shards in subdirectory
-                subdir_images = count_images_in_dir(subdir_path)
-                stats["successful_downloads"] += subdir_images
+                # Check for download_stats.json from custom downloader
+                custom_stats_file = os.path.join(subdir_path, "download_stats.json")
+                if os.path.exists(custom_stats_file):
+                    try:
+                        with open(custom_stats_file, 'r') as f:
+                            custom_stats = json.load(f)
+                            stats["has_img2dataset_output"] = True
+                            stats["successful_downloads"] += custom_stats.get("success", 0)
+                            stats["failed_downloads"] += custom_stats.get("failed", 0)
+                            stats["total_attempted"] += custom_stats.get("total", 0)
+                    except:
+                        pass
+                else:
+                    # Count images directly
+                    subdir_images = count_images_in_dir(subdir_path)
+                    if subdir_images > 0:
+                        stats["has_img2dataset_output"] = True
+                        stats["successful_downloads"] += subdir_images
 
     return stats
 
