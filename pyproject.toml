@@ -36,6 +36,7 @@ dependencies = [
     "scipy>=1.11.0",
     "requests>=2.31.0",
     "huggingface_hub>=0.19.0",
+    "albumentations>=1.4.0",
 ]
 
 [project.optional-dependencies]
@@ -74,4 +75,3 @@ target-version = ["py39", "py310", "py311"]
 [tool.isort]
 profile = "black"
 line_length = 100
-

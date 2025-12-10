@@ -2055,7 +2055,6 @@ def print_comprehensive_stats(data_root: str = "data"):
                 "type": config.get("type", "unknown"),
                 "img2dataset_stats": img2dataset_stats,
                 "extraction_status": extraction_status,
-                "image_downloads": result.get("image_downloads") if 'image_downloads' in result else None,
             })
         else:
             total_datasets_missing += 1
