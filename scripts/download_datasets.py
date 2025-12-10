@@ -71,9 +71,47 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Wandb configuration
-WANDB_PROJECT = "MicroVLM-E-datasets-logs"
-RUN_COUNTER_FILE = ".dataset_download_counter"
+EXTRACTION_MARKER_DIR = ".extraction_markers"
+ARCHIVE_EXTENSIONS = (".zip", ".tar.gz", ".tgz", ".tar")
+
+
+def get_extraction_marker_path(output_dir: str, archive_name: str) -> str:
+    marker_dir = os.path.join(output_dir, EXTRACTION_MARKER_DIR)
+    return os.path.join(marker_dir, f"{archive_name}.json")
+
+
+def load_extraction_marker(output_dir: str, archive_name: str) -> Optional[Dict]:
+    marker_path = get_extraction_marker_path(output_dir, archive_name)
+    if not os.path.exists(marker_path):
+        return None
+    try:
+        with open(marker_path, "r", encoding="utf-8") as marker_file:
+            data = json.load(marker_file)
+            if data.get("extracted_files", 0) > 0:
+                return data
+    except Exception:
+        pass
+    return None
+
+
+def save_extraction_marker(output_dir: str, archive_name: str,
+                           extracted_files: int, extracted_size: int) -> Dict:
+    marker_path = get_extraction_marker_path(output_dir, archive_name)
+    os.makedirs(os.path.dirname(marker_path), exist_ok=True)
+    data = {
+        "archive": archive_name,
+        "timestamp": datetime.now().isoformat(),
+        "extracted_files": extracted_files,
+        "extracted_size": extracted_size,
+    }
+    with open(marker_path, "w", encoding="utf-8") as marker_file:
+        json.dump(data, marker_file, indent=2)
+    return data
+
+
+def is_archive(filename: str) -> bool:
+    lower_name = filename.lower()
+    return lower_name.endswith(ARCHIVE_EXTENSIONS)
 
 
 # =============================================================================
@@ -635,34 +673,37 @@ def extract_archive(archive_path: str, output_dir: str) -> Tuple[bool, str, int,
     Returns:
         Tuple of (success: bool, error_message: str, extracted_size: int, extracted_files: int)
     """
+    archive_name = os.path.basename(archive_path)
     try:
-        logger.info(f"Extracting: {os.path.basename(archive_path)}")
+        logger.info(f"Extracting: {archive_name}")
         os.makedirs(output_dir, exist_ok=True)
 
-        # Get size before extraction
-        size_before, files_before = get_dir_size(output_dir)
+        extracted_files = 0
+        extracted_size = 0
 
         if archive_path.endswith(".zip"):
             with zipfile.ZipFile(archive_path, "r") as zip_ref:
+                members = [m for m in zip_ref.infolist() if not m.is_dir()]
+                extracted_files = len(members)
+                extracted_size = sum(m.file_size for m in members)
                 zip_ref.extractall(output_dir)
-
         elif archive_path.endswith((".tar.gz", ".tgz")):
             with tarfile.open(archive_path, "r:gz") as tar_ref:
+                members = [m for m in tar_ref.getmembers() if m.isfile()]
+                extracted_files = len(members)
+                extracted_size = sum(m.size for m in members)
                 tar_ref.extractall(output_dir)
-
         elif archive_path.endswith(".tar"):
             with tarfile.open(archive_path, "r") as tar_ref:
+                members = [m for m in tar_ref.getmembers() if m.isfile()]
+                extracted_files = len(members)
+                extracted_size = sum(m.size for m in members)
                 tar_ref.extractall(output_dir)
         else:
             return False, f"Unknown archive format: {archive_path}", 0, 0
 
-        # Get size after extraction
-        size_after, files_after = get_dir_size(output_dir)
-        extracted_size = size_after - size_before
-        extracted_files = files_after - files_before
-
-        logger.info(f"Successfully extracted: {os.path.basename(archive_path)} "
-                   f"({extracted_files} files, {format_bytes(extracted_size)})")
+        save_extraction_marker(output_dir, archive_name, extracted_files, extracted_size)
+        logger.info(f"Successfully extracted: {archive_name} ({extracted_files} files, {format_bytes(extracted_size)})")
         return True, "", extracted_size, extracted_files
 
     except zipfile.BadZipFile as e:
@@ -983,6 +1024,9 @@ def download_dataset(dataset_name: str, data_root: str = "data", wandb_run: Opti
         "downloaded_bytes": 0,
         "extracted_bytes": 0,
         "extracted_files": 0,
+        "extraction_attempts": 0,
+        "extraction_successes": 0,
+        "extraction_failures": 0,
     }
 
     # Handle HuggingFace datasets if specified
@@ -1071,21 +1115,25 @@ def download_dataset(dataset_name: str, data_root: str = "data", wandb_run: Opti
             url_result["size"] = existing_size
             results["skipped"] += 1
 
-            # But still try to extract if it's an archive and hasn't been extracted yet
-            if filename.endswith((".zip", ".tar.gz", ".tgz", ".tar")):
-                # Check if already extracted by looking for extracted files in the directory
-                # (simple heuristic: if there are more files than just the archives, it's probably extracted)
-                existing_files = len([f for f in os.listdir(output_dir) if os.path.isfile(os.path.join(output_dir, f))])
-                if existing_files <= len(config.get("urls", [])):  # Only archive files present
+            if is_archive(filename):
+                marker_data = load_extraction_marker(output_dir, filename)
+                if marker_data:
+                    logger.info(f"Archive already extracted on {marker_data['timestamp']}, skipping: {filename}")
+                    url_result["extracted_size"] = marker_data.get("extracted_size", 0)
+                    url_result["extracted_files"] = marker_data.get("extracted_files", 0)
+                else:
                     logger.info(f"Archive not yet extracted, extracting: {filename}")
+                    results["extraction_attempts"] += 1
                     extract_success, extract_error, extracted_size, extracted_files = extract_archive(download_path, output_dir)
                     if extract_success:
+                        results["extraction_successes"] += 1
                         url_result["extracted_size"] = extracted_size
                         url_result["extracted_files"] = extracted_files
                         results["extracted_bytes"] += extracted_size
                         results["extracted_files"] += extracted_files
                         logger.info(f"✓ Extracted {extracted_files} files ({format_bytes(extracted_size)})")
                     else:
+                        results["extraction_failures"] += 1
                         url_result["extraction_error"] = extract_error
                         logger.error(f"✗ Failed to extract {filename}: {extract_error}")
 
@@ -1101,19 +1149,27 @@ def download_dataset(dataset_name: str, data_root: str = "data", wandb_run: Opti
             results["downloaded"] += 1
             results["downloaded_bytes"] += file_size
 
-            # Attempt extraction if archive
-            if filename.endswith((".zip", ".tar.gz", ".tgz", ".tar")):
-                logger.info(f"Extracting archive: {filename}")
-                extract_success, extract_error, extracted_size, extracted_files = extract_archive(download_path, output_dir)
-                if extract_success:
-                    url_result["extracted_size"] = extracted_size
-                    url_result["extracted_files"] = extracted_files
-                    results["extracted_bytes"] += extracted_size
-                    results["extracted_files"] += extracted_files
-                    logger.info(f"✓ Extracted {extracted_files} files ({format_bytes(extracted_size)})")
+            if is_archive(filename):
+                marker_data = load_extraction_marker(output_dir, filename)
+                if marker_data:
+                    logger.info(f"Archive already extracted on {marker_data['timestamp']}, skipping: {filename}")
+                    url_result["extracted_size"] = marker_data.get("extracted_size", 0)
+                    url_result["extracted_files"] = marker_data.get("extracted_files", 0)
                 else:
-                    url_result["extraction_error"] = extract_error
-                    logger.error(f"✗ Failed to extract {filename}: {extract_error}")
+                    logger.info(f"Extracting archive: {filename}")
+                    results["extraction_attempts"] += 1
+                    extract_success, extract_error, extracted_size, extracted_files = extract_archive(download_path, output_dir)
+                    if extract_success:
+                        results["extraction_successes"] += 1
+                        url_result["extracted_size"] = extracted_size
+                        url_result["extracted_files"] = extracted_files
+                        results["extracted_bytes"] += extracted_size
+                        results["extracted_files"] += extracted_files
+                        logger.info(f"✓ Extracted {extracted_files} files ({format_bytes(extracted_size)})")
+                    else:
+                        results["extraction_failures"] += 1
+                        url_result["extraction_error"] = extract_error
+                        logger.error(f"✗ Failed to extract {filename}: {extract_error}")
         else:
             url_result["status"] = "failed"
             url_result["error"] = error
@@ -1229,6 +1285,9 @@ def download_all_datasets(data_root: str = "data", wandb_run: Optional[object] =
         "total_files_in_directories": 0,
         "total_images": 0,
         "start_time": time.time(),
+        "total_extraction_attempts": 0,
+        "total_extraction_successes": 0,
+        "total_extraction_failures": 0,
     }
 
     logger.info("")
@@ -1273,6 +1332,9 @@ def download_all_datasets(data_root: str = "data", wandb_run: Optional[object] =
         all_results["total_directory_size"] += result.get("total_directory_size", 0)
         all_results["total_files_in_directories"] += result.get("total_files_in_directory", 0)
         all_results["total_images"] += result.get("image_count", 0)
+        all_results["total_extraction_attempts"] += result.get("extraction_attempts", 0)
+        all_results["total_extraction_successes"] += result.get("extraction_successes", 0)
+        all_results["total_extraction_failures"] += result.get("extraction_failures", 0)
 
         # Store all results (even successful ones) for detailed reporting
         if result.get("failed", 0) == 0 and result.get("downloaded", 0) > 0:
@@ -1349,10 +1411,9 @@ def download_all_datasets(data_root: str = "data", wandb_run: Optional[object] =
             "summary/total_directory_size": all_results['total_directory_size'],
             "summary/total_files_in_directories": all_results['total_files_in_directories'],
             "summary/total_images": all_results['total_images'],
-            # Human-readable versions
-            "summary/total_downloaded_gb": all_results['total_bytes_downloaded'] / (1024**3),
-            "summary/total_extracted_gb": all_results['total_bytes_extracted'] / (1024**3),
-            "summary/total_storage_gb": all_results['total_directory_size'] / (1024**3),
+            "summary/total_extraction_attempts": all_results['total_extraction_attempts'],
+            "summary/total_extraction_successes": all_results['total_extraction_successes'],
+            "summary/total_extraction_failures": all_results['total_extraction_failures'],
         }
 
         log_to_wandb(wandb_run, final_metrics)
@@ -1418,17 +1479,26 @@ def print_final_summary(results: Dict):
     print("=" * 80)
     print("OVERALL STATISTICS")
     print("=" * 80)
-    print(f"  Total Files/Resources Downloaded: {results['total_files_downloaded']}")
-    print(f"  Total Failed:                     {results['total_files_failed']}")
-    print(f"  Total Skipped (already existed):  {results['total_files_skipped']}")
-    print("")
     total_attempted = (results['total_files_downloaded'] +
                        results['total_files_failed'] +
                        results['total_files_skipped'])
+    print(f"  Total Files Attempted:          {total_attempted}")
+    print(f"  Successfully Downloaded:        {results['total_files_downloaded']}")
+    print(f"  Failed Downloads:               {results['total_files_failed']}")
+    print(f"  Skipped (already existed):      {results['total_files_skipped']}")
     if total_attempted > 0:
         success_rate = (results['total_files_downloaded'] /
                        (results['total_files_downloaded'] + results['total_files_failed'])) * 100 if (results['total_files_downloaded'] + results['total_files_failed']) > 0 else 0
-        print(f"  Success Rate: {success_rate:.1f}%")
+        print(f"  Success Rate:                   {success_rate:.1f}%")
+
+    print("")
+    print("=" * 80)
+    print("EXTRACTION SUMMARY")
+    print("=" * 80)
+    print(f"  Extraction Attempts:            {results.get('total_extraction_attempts', 0)}")
+    print(f"  Successful Extractions:         {results.get('total_extraction_successes', 0)}")
+    print(f"  Failed Extractions:             {results.get('total_extraction_failures', 0)}")
+    print(f"  Successfully Extracted Files:   {results.get('total_extracted_files', 0)}")
 
     print("")
     print("=" * 80)
@@ -1440,8 +1510,6 @@ def print_final_summary(results: Dict):
     print(f"  Total Storage Used:      {format_bytes(results.get('total_directory_size', 0))}")
     print(f"  Total Files in Dirs:     {results.get('total_files_in_directories', 0)}")
     print(f"  Total Images Found:      {results.get('total_images', 0)}")
-    print("")
-    duration = results.get('duration_seconds', 0)
     print(f"  Total Duration:          {int(duration // 60)}m {int(duration % 60)}s")
 
     print("")
@@ -2111,6 +2179,9 @@ def main():
                 "total_files_in_directories": 0,
                 "total_images": 0,
                 "start_time": time.time(),
+                "total_extraction_attempts": 0,
+                "total_extraction_successes": 0,
+                "total_extraction_failures": 0,
             }
 
             for dataset_name in args.datasets:
@@ -2137,6 +2208,9 @@ def main():
                 results["total_directory_size"] += result.get("total_directory_size", 0)
                 results["total_files_in_directories"] += result.get("total_files_in_directory", 0)
                 results["total_images"] += result.get("image_count", 0)
+                results["total_extraction_attempts"] += result.get("extraction_attempts", 0)
+                results["total_extraction_successes"] += result.get("extraction_successes", 0)
+                results["total_extraction_failures"] += result.get("extraction_failures", 0)
 
                 if result.get("failed", 0) == 0:
                     results["downloaded_datasets"].append(dataset_name)
@@ -2161,6 +2235,7 @@ def main():
                     "summary/total_files_skipped": results['total_files_skipped'],
                     "summary/overall_success_rate": overall_success_rate,
                     "summary/duration_seconds": results['duration_seconds'],
+                    "summary/duration_minutes": results['duration_seconds'] / 60,
                     "summary/datasets_requested": len(args.datasets),
                     # Comprehensive statistics
                     "summary/total_bytes_downloaded": results['total_bytes_downloaded'],
@@ -2169,9 +2244,9 @@ def main():
                     "summary/total_directory_size": results['total_directory_size'],
                     "summary/total_files_in_directories": results['total_files_in_directories'],
                     "summary/total_images": results['total_images'],
-                    "summary/total_downloaded_gb": results['total_bytes_downloaded'] / (1024**3),
-                    "summary/total_extracted_gb": results['total_bytes_extracted'] / (1024**3),
-                    "summary/total_storage_gb": results['total_directory_size'] / (1024**3),
+                    "summary/total_extraction_attempts": results['total_extraction_attempts'],
+                    "summary/total_extraction_successes": results['total_extraction_successes'],
+                    "summary/total_extraction_failures": results['total_extraction_failures'],
                 })
 
             print_final_summary(results)
