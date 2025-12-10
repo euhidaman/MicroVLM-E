@@ -74,6 +74,9 @@ logger = logging.getLogger(__name__)
 EXTRACTION_MARKER_DIR = ".extraction_markers"
 ARCHIVE_EXTENSIONS = (".zip", ".tar.gz", ".tgz", ".tar")
 
+# Global flag for forcing image downloads
+FORCE_IMAGE_DOWNLOAD = False
+
 
 def get_extraction_marker_path(output_dir: str, archive_name: str) -> str:
     marker_dir = os.path.join(output_dir, EXTRACTION_MARKER_DIR)
@@ -793,9 +796,13 @@ def extract_archive(archive_path: str, output_dir: str) -> Tuple[bool, str, int,
         return False, error_msg, 0, 0
 
 
-def setup_cc3m_with_img2dataset(output_dir: str) -> Tuple[bool, Dict]:
+def setup_cc3m_with_img2dataset(output_dir: str, force: bool = False) -> Tuple[bool, Dict]:
     """
     Automatically download CC3M images using img2dataset.
+
+    Args:
+        output_dir: Directory containing CC3M TSV files
+        force: If True, re-download images even if they exist
 
     Returns:
         (success flag, image download stats dict)
@@ -839,12 +846,18 @@ def setup_cc3m_with_img2dataset(output_dir: str) -> Tuple[bool, Dict]:
     for split_name, tsv_path in tsv_files:
         images_dir = os.path.join(output_dir, f"images_{split_name}")
 
-        # Skip if already downloaded
-        if os.path.exists(images_dir) and len(os.listdir(images_dir)) > 0:
-            logger.info(f"CC3M {split_name} images already exist, collecting stats.")
-            split_stats = read_img2dataset_stats(images_dir)
-            merge_img_download_stats(img_stats, split_stats, f"cc3m_{split_name}")
-            continue
+        # Skip if already downloaded (check for webdataset tar files) unless force is True
+        if not force and os.path.exists(images_dir):
+            tar_files = [f for f in os.listdir(images_dir) if f.endswith('.tar')]
+            if len(tar_files) > 0:
+                logger.info(f"CC3M {split_name} images already exist ({len(tar_files)} shards), collecting stats.")
+                split_stats = read_img2dataset_stats(images_dir)
+                merge_img_download_stats(img_stats, split_stats, f"cc3m_{split_name}")
+                continue
+            else:
+                logger.info(f"CC3M {split_name} images directory exists but no tar files found. Will download.")
+        elif force:
+            logger.info(f"Force flag set - will re-download CC3M {split_name} images")
 
         logger.info(f"Downloading CC3M {split_name} images...")
         logger.info(f"Source: {tsv_path}")
@@ -873,24 +886,42 @@ def setup_cc3m_with_img2dataset(output_dir: str) -> Tuple[bool, Dict]:
             # Run without check so it doesn't fail on partial errors
             result = subprocess.run(cmd, check=False, capture_output=True, text=True)
 
-            # Log stderr for debugging
+            # Log both stdout and stderr for debugging
+            if result.stdout:
+                logger.info(f"img2dataset stdout (first 1000 chars):")
+                logger.info(result.stdout[:1000])
+
             if result.stderr:
-                logger.info(f"img2dataset output: {result.stderr[:500]}")  # First 500 chars
+                logger.info(f"img2dataset stderr (first 1000 chars):")
+                logger.info(result.stderr[:1000])
 
             # Check if output directory was created and has files
             if os.path.exists(images_dir) and len([f for f in os.listdir(images_dir) if f.endswith('.tar')]) > 0:
                 tar_count = len([f for f in os.listdir(images_dir) if f.endswith('.tar')])
-                logger.info(f"✓ Successfully started downloading CC3M {split_name} images - {tar_count} shards created so far")
+                logger.info(f"✓ Successfully downloaded CC3M {split_name} images - {tar_count} shards created")
             elif result.returncode == 0:
-                logger.info(f"✓ img2dataset completed for {split_name}")
+                logger.info(f"✓ img2dataset completed for {split_name} with return code 0")
+                # Check if any files were created
+                if os.path.exists(images_dir):
+                    all_files = os.listdir(images_dir)
+                    logger.info(f"Files in output directory: {len(all_files)}")
+                else:
+                    logger.warning(f"⚠ Output directory was not created: {images_dir}")
             else:
-                logger.warning(f"⚠ img2dataset may have encountered errors for {split_name}. Check output directory.")
+                logger.warning(f"⚠ img2dataset encountered errors for {split_name}")
                 logger.warning(f"Return code: {result.returncode}")
+                if os.path.exists(images_dir):
+                    all_files = os.listdir(images_dir)
+                    logger.info(f"Files created despite errors: {len(all_files)}")
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to run img2dataset for {split_name}: {e}")
+            logger.error(f"Command: {' '.join(cmd)}")
             success = False
         except Exception as e:
             logger.error(f"Unexpected error running img2dataset for {split_name}: {e}")
+            logger.error(f"Command: {' '.join(cmd)}")
+            import traceback
+            logger.error(traceback.format_exc())
             success = False
 
         split_stats = read_img2dataset_stats(images_dir)
@@ -900,9 +931,13 @@ def setup_cc3m_with_img2dataset(output_dir: str) -> Tuple[bool, Dict]:
     return success, img_stats
 
 
-def setup_laion_with_img2dataset(output_dir: str) -> Tuple[bool, Dict]:
+def setup_laion_with_img2dataset(output_dir: str, force: bool = False) -> Tuple[bool, Dict]:
     """
     Automatically download LAION images using img2dataset.
+
+    Args:
+        output_dir: Directory containing LAION parquet files
+        force: If True, re-download images even if they exist
 
     Returns:
         (success flag, image download stats dict)
@@ -956,12 +991,19 @@ def setup_laion_with_img2dataset(output_dir: str) -> Tuple[bool, Dict]:
 
     images_dir = os.path.join(output_dir, "images")
 
-    # Skip if already downloaded
-    if os.path.exists(images_dir) and len(os.listdir(images_dir)) > 0:
-        logger.info(f"LAION images already exist, collecting stats.")
-        split_stats = read_img2dataset_stats(images_dir)
-        merge_img_download_stats(img_stats, split_stats, "laion_images")
-        return True, img_stats
+    # Skip if already downloaded (check for webdataset tar files) unless force is True
+    if not force and os.path.exists(images_dir):
+        tar_files = [f for f in os.listdir(images_dir) if f.endswith('.tar')]
+        if len(tar_files) > 0:
+            logger.info(f"LAION images already exist ({len(tar_files)} shards), collecting stats.")
+            split_stats = read_img2dataset_stats(images_dir)
+            merge_img_download_stats(img_stats, split_stats, "laion_images")
+            return True, img_stats
+        else:
+            logger.info(f"LAION images directory exists but no tar files found. Will download.")
+    elif force:
+        logger.info(f"Force flag set - will re-download LAION images")
+
     success = True
     for parquet_file in parquet_files:
         # Handle both absolute and relative paths
@@ -995,24 +1037,42 @@ def setup_laion_with_img2dataset(output_dir: str) -> Tuple[bool, Dict]:
             logger.info(f"Running: {' '.join(cmd)}")
             result = subprocess.run(cmd, check=False, capture_output=True, text=True)
 
-            # Log stderr for debugging
+            # Log both stdout and stderr for debugging
+            if result.stdout:
+                logger.info(f"img2dataset stdout (first 1000 chars):")
+                logger.info(result.stdout[:1000])
+
             if result.stderr:
-                logger.info(f"img2dataset output: {result.stderr[:500]}")  # First 500 chars
+                logger.info(f"img2dataset stderr (first 1000 chars):")
+                logger.info(result.stderr[:1000])
 
             # Check if output directory was created and has files
             if os.path.exists(images_dir) and len([f for f in os.listdir(images_dir) if f.endswith('.tar')]) > 0:
                 tar_count = len([f for f in os.listdir(images_dir) if f.endswith('.tar')])
-                logger.info(f"✓ Successfully started downloading LAION images - {tar_count} shards created so far")
+                logger.info(f"✓ Successfully downloaded LAION images - {tar_count} shards created")
             elif result.returncode == 0:
-                logger.info(f"✓ img2dataset completed for LAION")
+                logger.info(f"✓ img2dataset completed for LAION with return code 0")
+                # Check if any files were created
+                if os.path.exists(images_dir):
+                    all_files = os.listdir(images_dir)
+                    logger.info(f"Files in output directory: {len(all_files)}")
+                else:
+                    logger.warning(f"⚠ Output directory was not created: {images_dir}")
             else:
-                logger.warning(f"⚠ img2dataset may have encountered errors. Check output directory.")
+                logger.warning(f"⚠ img2dataset encountered errors")
                 logger.warning(f"Return code: {result.returncode}")
+                if os.path.exists(images_dir):
+                    all_files = os.listdir(images_dir)
+                    logger.info(f"Files created despite errors: {len(all_files)}")
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to run img2dataset for {os.path.basename(parquet_path)}: {e}")
+            logger.error(f"Command: {' '.join(cmd)}")
             success = False
         except Exception as e:
             logger.error(f"Unexpected error running img2dataset for {os.path.basename(parquet_path)}: {e}")
+            logger.error(f"Command: {' '.join(cmd)}")
+            import traceback
+            logger.error(traceback.format_exc())
             success = False
 
         merge_img_download_stats(img_stats, read_img2dataset_stats(images_dir), os.path.basename(parquet_path))
@@ -1296,11 +1356,11 @@ def download_dataset(dataset_name: str, data_root: str = "data", wandb_run: Opti
     # Run post-download setup if specified
     post_download_action = config.get("post_download")
     if post_download_action == "cc3m_setup":
-        cc_success, cc_stats = setup_cc3m_with_img2dataset(output_dir)
+        cc_success, cc_stats = setup_cc3m_with_img2dataset(output_dir, force=FORCE_IMAGE_DOWNLOAD)
         results["post_download_success"] = cc_success
         merge_img_download_stats(results["image_downloads"], cc_stats, "cc3m")
     elif post_download_action == "laion_setup":
-        laion_success, laion_stats = setup_laion_with_img2dataset(output_dir)
+        laion_success, laion_stats = setup_laion_with_img2dataset(output_dir, force=FORCE_IMAGE_DOWNLOAD)
         results["post_download_success"] = laion_success
         merge_img_download_stats(results["image_downloads"], laion_stats, "laion")
 
@@ -2266,6 +2326,116 @@ def create_dataset_config(data_root: str = "data", output_path: str = "configs/d
     logger.info(f"Dataset configuration saved to: {output_path}")
 
 
+def extract_all_archives(data_root: str = "data"):
+    """Extract all unextracted archives in all dataset directories."""
+    logger.info("")
+    logger.info("#" * 80)
+    logger.info("# EXTRACTING ALL ARCHIVES")
+    logger.info("#" * 80)
+    logger.info("")
+
+    total_extracted = 0
+    total_failed = 0
+
+    for ds_name, config in DATASET_CONFIGS.items():
+        output_dir = os.path.join(data_root, os.path.basename(config["output_dir"]))
+
+        if not os.path.exists(output_dir):
+            continue
+
+        # Find all archives
+        archives = [f for f in os.listdir(output_dir) if f.endswith(ARCHIVE_EXTENSIONS)]
+
+        if not archives:
+            continue
+
+        logger.info(f"Processing {config['name']} - found {len(archives)} archive(s)")
+
+        for archive in archives:
+            archive_path = os.path.join(output_dir, archive)
+
+            # Check if already extracted
+            marker = load_extraction_marker(output_dir, archive)
+            if marker:
+                logger.info(f"  Already extracted: {archive}")
+                continue
+
+            logger.info(f"  Extracting: {archive}")
+            success, error, extracted_size, extracted_files = extract_archive(archive_path, output_dir)
+
+            if success:
+                save_extraction_marker(output_dir, archive, extracted_files, extracted_size)
+                logger.info(f"    ✓ Extracted {extracted_files} files ({format_bytes(extracted_size)})")
+                total_extracted += 1
+            else:
+                logger.error(f"    ✗ Failed: {error}")
+                total_failed += 1
+
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info(f"Extraction complete: {total_extracted} successful, {total_failed} failed")
+    logger.info("=" * 80)
+    logger.info("")
+
+
+def download_images_only(data_root: str = "data"):
+    """Download images for CC3M and LAION only (requires metadata to be present)."""
+    global FORCE_IMAGE_DOWNLOAD
+
+    logger.info("")
+    logger.info("#" * 80)
+    logger.info("# DOWNLOADING IMAGES FOR CC3M AND LAION")
+    logger.info("#" * 80)
+    logger.info("")
+
+    results = {
+        "cc3m": None,
+        "laion": None,
+    }
+
+    # CC3M
+    cc3m_dir = os.path.join(data_root, "cc3m")
+    if os.path.exists(cc3m_dir):
+        logger.info("Processing CC3M...")
+        cc_success, cc_stats = setup_cc3m_with_img2dataset(cc3m_dir, force=FORCE_IMAGE_DOWNLOAD)
+        results["cc3m"] = {"success": cc_success, "stats": cc_stats}
+    else:
+        logger.warning("CC3M directory not found. Download metadata first with: --datasets cc3m")
+
+    # LAION
+    laion_dir = os.path.join(data_root, "laion")
+    if os.path.exists(laion_dir):
+        logger.info("Processing LAION...")
+        laion_success, laion_stats = setup_laion_with_img2dataset(laion_dir, force=FORCE_IMAGE_DOWNLOAD)
+        results["laion"] = {"success": laion_success, "stats": laion_stats}
+    else:
+        logger.warning("LAION directory not found. Download metadata first with: --datasets laion")
+
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("IMAGE DOWNLOAD SUMMARY")
+    logger.info("=" * 80)
+
+    if results["cc3m"]:
+        status = "✓ Success" if results["cc3m"]["success"] else "✗ Failed"
+        logger.info(f"CC3M: {status}")
+        stats = results["cc3m"]["stats"]
+        logger.info(f"  Attempts: {stats.get('attempts', 0)}")
+        logger.info(f"  Successes: {stats.get('successes', 0)}")
+        logger.info(f"  Failures: {stats.get('failures', 0)}")
+
+    if results["laion"]:
+        status = "✓ Success" if results["laion"]["success"] else "✗ Failed"
+        logger.info(f"LAION: {status}")
+        stats = results["laion"]["stats"]
+        logger.info(f"  Attempts: {stats.get('attempts', 0)}")
+        logger.info(f"  Successes: {stats.get('successes', 0)}")
+        logger.info(f"  Failures: {stats.get('failures', 0)}")
+
+    logger.info("=" * 80)
+    logger.info("")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Download datasets for MicroVLM-E training",
@@ -2323,15 +2493,37 @@ Examples:
         action="store_true",
         help="Disable Weights & Biases logging"
     )
+    parser.add_argument(
+        "--force-images",
+        action="store_true",
+        help="Force re-download of images for CC3M and LAION even if they exist"
+    )
+    parser.add_argument(
+        "--extract-archives",
+        action="store_true",
+        help="Extract all unextracted archives in downloaded datasets"
+    )
+    parser.add_argument(
+        "--download-images-only",
+        action="store_true",
+        help="Only download images for CC3M and LAION (requires metadata to be downloaded first)"
+    )
 
     return parser.parse_args()
 
 
 def main():
+    global FORCE_IMAGE_DOWNLOAD
+
     args = parse_args()
 
     # Create data root
     os.makedirs(args.data_root, exist_ok=True)
+
+    # Set global force flag
+    if hasattr(args, 'force_images') and args.force_images:
+        FORCE_IMAGE_DOWNLOAD = True
+        logger.info("Force image download flag set - will re-download images even if they exist")
 
     if args.status:
         print_status(args.data_root)
@@ -2343,6 +2535,16 @@ def main():
 
     if args.create_config:
         create_dataset_config(args.data_root)
+        return
+
+    # Handle extract archives flag
+    if hasattr(args, 'extract_archives') and args.extract_archives:
+        extract_all_archives(args.data_root)
+        return
+
+    # Handle download images only flag
+    if hasattr(args, 'download_images_only') and args.download_images_only:
+        download_images_only(args.data_root)
         return
 
     # Initialize wandb for download tracking (unless disabled)
