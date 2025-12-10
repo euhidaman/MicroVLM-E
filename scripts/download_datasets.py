@@ -114,6 +114,77 @@ def is_archive(filename: str) -> bool:
     return lower_name.endswith(ARCHIVE_EXTENSIONS)
 
 
+def download_hf_dataset_snapshot(dataset_name: str, output_dir: str,
+                                 allow_patterns: Optional[List[str]] = None,
+                                 ignore_patterns: Optional[List[str]] = None,
+                                 requires_token: bool = False) -> Tuple[int, int, int]:
+    token = get_hf_token() if requires_token else None
+    snapshot_dir = os.path.join(output_dir, "hf_snapshot")
+    os.makedirs(snapshot_dir, exist_ok=True)
+    try:
+        logger.info(f"Snapshotting HuggingFace dataset: {dataset_name}")
+        snapshot_download(
+            repo_id=dataset_name,
+            repo_type="dataset",
+            token=token,
+            local_dir=snapshot_dir,
+            local_dir_use_symlinks=False,
+            allow_patterns=allow_patterns,
+            ignore_patterns=ignore_patterns,
+        )
+        total_size, file_count = get_dir_size(snapshot_dir)
+        logger.info(f"✓ Snapshot complete: {file_count} files ({format_bytes(total_size)})")
+        return 1, 0, total_size
+    except Exception as exc:
+        logger.error(f"✗ Failed to snapshot HF dataset {dataset_name}: {exc}")
+        return 0, 1, 0
+
+
+def read_img2dataset_stats(images_dir: str) -> Dict:
+    stats_path = os.path.join(images_dir, "stats.json")
+    stats_data = {}
+    if os.path.exists(stats_path):
+        try:
+            with open(stats_path, "r", encoding="utf-8") as stats_file:
+                stats_data = json.load(stats_file)
+        except Exception as exc:
+            logger.warning(f"Could not parse {stats_path}: {exc}")
+    successes = (stats_data.get("success") or stats_data.get("downloaded") or
+                 stats_data.get("num_success") or 0)
+    failures = (stats_data.get("failed") or stats_data.get("errors") or
+                stats_data.get("num_failed") or 0)
+    attempts = (stats_data.get("total") or stats_data.get("attempted") or
+                stats_data.get("processed") or 0)
+    if attempts == 0:
+        attempts = successes + failures
+    return {
+        "attempts": attempts,
+        "successes": successes,
+        "failures": failures,
+        "stats_path": stats_path if os.path.exists(stats_path) else None,
+    }
+
+
+def merge_img_download_stats(base: Dict, addition: Optional[Dict], label: str) -> Dict:
+    addition = addition or {}
+    base.setdefault("details", [])
+    base.setdefault("attempts", 0)
+    base.setdefault("successes", 0)
+    base.setdefault("failures", 0)
+    entry = {
+        "label": addition.get("label", label),
+        "attempts": addition.get("attempts", 0),
+        "successes": addition.get("successes", 0),
+        "failures": addition.get("failures", 0),
+        "stats_path": addition.get("stats_path"),
+    }
+    base["details"].append(entry)
+    base["attempts"] += entry["attempts"]
+    base["successes"] += entry["successes"]
+    base["failures"] += entry["failures"]
+    return base
+
+
 # =============================================================================
 # DATASET CONFIGURATIONS
 # =============================================================================
@@ -722,16 +793,15 @@ def extract_archive(archive_path: str, output_dir: str) -> Tuple[bool, str, int,
         return False, error_msg, 0, 0
 
 
-def setup_cc3m_with_img2dataset(output_dir: str) -> bool:
+def setup_cc3m_with_img2dataset(output_dir: str) -> Tuple[bool, Dict]:
     """
     Automatically download CC3M images using img2dataset.
 
-    Args:
-        output_dir: CC3M data directory
-
     Returns:
-        True if download succeeded, False otherwise
+        (success flag, image download stats dict)
     """
+    img_stats = {"attempts": 0, "successes": 0, "failures": 0, "details": []}
+
     # Check if img2dataset is available
     if not shutil.which("img2dataset"):
         logger.error("img2dataset not found. Install with: pip install img2dataset")
@@ -742,7 +812,7 @@ def setup_cc3m_with_img2dataset(output_dir: str) -> bool:
         logger.info("Install img2dataset: pip install img2dataset")
         logger.info("Then run the download script again.")
         logger.info("=" * 70)
-        return False
+        return False, img_stats
 
     tsv_files = []
 
@@ -757,7 +827,7 @@ def setup_cc3m_with_img2dataset(output_dir: str) -> bool:
 
     if not tsv_files:
         logger.warning("No CC3M TSV files found. Cannot proceed with image download.")
-        return False
+        return False, img_stats
 
     logger.info("")
     logger.info("=" * 70)
@@ -771,7 +841,9 @@ def setup_cc3m_with_img2dataset(output_dir: str) -> bool:
 
         # Skip if already downloaded
         if os.path.exists(images_dir) and len(os.listdir(images_dir)) > 0:
-            logger.info(f"CC3M {split_name} images already exist, skipping download.")
+            logger.info(f"CC3M {split_name} images already exist, collecting stats.")
+            split_stats = read_img2dataset_stats(images_dir)
+            merge_img_download_stats(img_stats, split_stats, f"cc3m_{split_name}")
             continue
 
         logger.info(f"Downloading CC3M {split_name} images...")
@@ -821,20 +893,22 @@ def setup_cc3m_with_img2dataset(output_dir: str) -> bool:
             logger.error(f"Unexpected error running img2dataset for {split_name}: {e}")
             success = False
 
+        split_stats = read_img2dataset_stats(images_dir)
+        merge_img_download_stats(img_stats, split_stats, f"cc3m_{split_name}")
+
     logger.info("=" * 70)
-    return success
+    return success, img_stats
 
 
-def setup_laion_with_img2dataset(output_dir: str) -> bool:
+def setup_laion_with_img2dataset(output_dir: str) -> Tuple[bool, Dict]:
     """
     Automatically download LAION images using img2dataset.
 
-    Args:
-        output_dir: LAION data directory
-
     Returns:
-        True if download succeeded, False otherwise
+        (success flag, image download stats dict)
     """
+    img_stats = {"attempts": 0, "successes": 0, "failures": 0, "details": []}
+
     # Check if img2dataset is available
     if not shutil.which("img2dataset"):
         logger.error("img2dataset not found. Install with: pip install img2dataset")
@@ -845,7 +919,7 @@ def setup_laion_with_img2dataset(output_dir: str) -> bool:
         logger.info("Install img2dataset: pip install img2dataset")
         logger.info("Then run the download script again.")
         logger.info("=" * 70)
-        return False
+        return False, img_stats
 
     # Check for parquet files or HF dataset directory
     parquet_files = []
@@ -872,7 +946,7 @@ def setup_laion_with_img2dataset(output_dir: str) -> bool:
             logger.warning("No LAION parquet files found. The dataset may need to be downloaded from HuggingFace first.")
             logger.info("The dataset should have been downloaded using the HF datasets library.")
             logger.info("If this failed, you may need to manually download the dataset or use a different LAION subset.")
-            return False
+            return False, img_stats
 
     logger.info("")
     logger.info("=" * 70)
@@ -884,9 +958,10 @@ def setup_laion_with_img2dataset(output_dir: str) -> bool:
 
     # Skip if already downloaded
     if os.path.exists(images_dir) and len(os.listdir(images_dir)) > 0:
-        logger.info(f"LAION images already exist, skipping download.")
-        return True
-
+        logger.info(f"LAION images already exist, collecting stats.")
+        split_stats = read_img2dataset_stats(images_dir)
+        merge_img_download_stats(img_stats, split_stats, "laion_images")
+        return True, img_stats
     success = True
     for parquet_file in parquet_files:
         # Handle both absolute and relative paths
@@ -940,8 +1015,10 @@ def setup_laion_with_img2dataset(output_dir: str) -> bool:
             logger.error(f"Unexpected error running img2dataset for {os.path.basename(parquet_path)}: {e}")
             success = False
 
+        merge_img_download_stats(img_stats, read_img2dataset_stats(images_dir), os.path.basename(parquet_path))
+
     logger.info("=" * 70)
-    return success
+    return success, img_stats
 
 
 def download_gdrive_folder(folder_id: str, output_dir: str) -> Tuple[bool, str, int, int]:
@@ -1027,6 +1104,7 @@ def download_dataset(dataset_name: str, data_root: str = "data", wandb_run: Opti
         "extraction_attempts": 0,
         "extraction_successes": 0,
         "extraction_failures": 0,
+        "image_downloads": {"attempts": 0, "successes": 0, "failures": 0, "details": []},
     }
 
     # Handle HuggingFace datasets if specified
@@ -1218,9 +1296,13 @@ def download_dataset(dataset_name: str, data_root: str = "data", wandb_run: Opti
     # Run post-download setup if specified
     post_download_action = config.get("post_download")
     if post_download_action == "cc3m_setup":
-        setup_cc3m_with_img2dataset(output_dir)
+        cc_success, cc_stats = setup_cc3m_with_img2dataset(output_dir)
+        results["post_download_success"] = cc_success
+        merge_img_download_stats(results["image_downloads"], cc_stats, "cc3m")
     elif post_download_action == "laion_setup":
-        setup_laion_with_img2dataset(output_dir)
+        laion_success, laion_stats = setup_laion_with_img2dataset(output_dir)
+        results["post_download_success"] = laion_success
+        merge_img_download_stats(results["image_downloads"], laion_stats, "laion")
 
     # Get final directory statistics
     total_dir_size, total_files = get_dir_size(output_dir)
@@ -1288,6 +1370,10 @@ def download_all_datasets(data_root: str = "data", wandb_run: Optional[object] =
         "total_extraction_attempts": 0,
         "total_extraction_successes": 0,
         "total_extraction_failures": 0,
+        "total_image_download_attempts": 0,
+        "total_image_download_successes": 0,
+        "total_image_download_failures": 0,
+        "image_download_details": [],
     }
 
     logger.info("")
@@ -1332,9 +1418,11 @@ def download_all_datasets(data_root: str = "data", wandb_run: Optional[object] =
         all_results["total_directory_size"] += result.get("total_directory_size", 0)
         all_results["total_files_in_directories"] += result.get("total_files_in_directory", 0)
         all_results["total_images"] += result.get("image_count", 0)
-        all_results["total_extraction_attempts"] += result.get("extraction_attempts", 0)
-        all_results["total_extraction_successes"] += result.get("extraction_successes", 0)
-        all_results["total_extraction_failures"] += result.get("extraction_failures", 0)
+        img_stats = result.get("image_downloads", {})
+        all_results["total_image_download_attempts"] += img_stats.get("attempts", 0)
+        all_results["total_image_download_successes"] += img_stats.get("successes", 0)
+        all_results["total_image_download_failures"] += img_stats.get("failures", 0)
+        all_results["image_download_details"].extend(img_stats.get("details", []))
 
         # Store all results (even successful ones) for detailed reporting
         if result.get("failed", 0) == 0 and result.get("downloaded", 0) > 0:
@@ -1414,6 +1502,113 @@ def download_all_datasets(data_root: str = "data", wandb_run: Optional[object] =
             "summary/total_extraction_attempts": all_results['total_extraction_attempts'],
             "summary/total_extraction_successes": all_results['total_extraction_successes'],
             "summary/total_extraction_failures": all_results['total_extraction_failures'],
+            "summary/image_download_attempts": all_results['total_image_download_attempts'],
+            "summary/image_download_successes": all_results['total_image_download_successes'],
+            "summary/image_download_failures": all_results['total_image_download_failures'],
+        }
+
+        log_to_wandb(wandb_run, final_metrics)
+
+        # Create summary table for wandb
+        try:
+            dataset_table_data = []
+            for item in all_results.get("failed_datasets", []):
+                ds_name = item["dataset"]
+                ds_result = item["result"]
+                config = DATASET_CONFIGS.get(ds_name, {})
+
+                total_files = (ds_result.get("downloaded", 0) +
+                              ds_result.get("failed", 0) +
+                              ds_result.get("skipped", 0))
+                success_rate = (ds_result.get("downloaded", 0) /
+                               (ds_result.get("downloaded", 0) + ds_result.get("failed", 0)) * 100) if (ds_result.get("downloaded", 0) + ds_result.get("failed", 0)) > 0 else 0
+
+                status = "✓ Full" if ds_result.get("failed", 0) == 0 and ds_result.get("downloaded", 0) > 0 else \
+                        "⚠ Partial" if ds_result.get("downloaded", 0) > 0 and ds_result.get("failed", 0) > 0 else \
+                        "✗ Failed" if ds_result.get("failed", 0) > 0 else "⊘ Skipped"
+
+                dataset_table_data.append([
+                    config.get("name", ds_name),
+                    status,
+                    ds_result.get("downloaded", 0),
+                    ds_result.get("failed", 0),
+                    ds_result.get("skipped", 0),
+                    total_files,
+                    f"{success_rate:.1f}%",
+                    format_bytes(ds_result.get("downloaded_bytes", 0)),
+                    format_bytes(ds_result.get("extracted_bytes", 0)),
+                    ds_result.get("extracted_files", 0),
+                    format_bytes(ds_result.get("total_directory_size", 0)),
+                    ds_result.get("total_files_in_directory", 0),
+                    ds_result.get("image_count", 0),
+                ])
+
+            table = wandb.Table(
+                columns=[
+                    "Dataset", "Status", "Downloaded", "Failed", "Skipped", "Total",
+                    "Success Rate", "Downloaded Size", "Extracted Size", "Extracted Files",
+                    "Total Dir Size", "Total Files", "Images"
+                ],
+                data=dataset_table_data
+            )
+            wandb.log({"dataset_summary_table": table})
+
+        except Exception as e:
+            logger.warning(f"Failed to create wandb summary table: {e}")
+
+    # Calculate final statistics
+    all_results["end_time"] = time.time()
+    all_results["duration_seconds"] = all_results["end_time"] - all_results["start_time"]
+
+    # Log final summary to wandb
+    if wandb_run is not None:
+        total_attempted = (all_results['total_files_downloaded'] +
+                          all_results['total_files_failed'] +
+                          all_results['total_files_skipped'])
+        overall_success_rate = (all_results['total_files_downloaded'] /
+                               (all_results['total_files_downloaded'] + all_results['total_files_failed']) * 100) if (all_results['total_files_downloaded'] + all_results['total_files_failed']) > 0 else 0
+
+        fully_downloaded = len([ds for ds, info in
+                               {ds: info for item in all_results.get("failed_datasets", [])
+                                for ds, info in [(item["dataset"], item["result"])]}.items()
+                               if info.get("failed", 0) == 0 and info.get("downloaded", 0) > 0])
+
+        partially_downloaded = len([ds for ds, info in
+                                   {ds: info for item in all_results.get("failed_datasets", [])
+                                    for ds, info in [(item["dataset"], item["result"])]}.items()
+                                   if info.get("downloaded", 0) > 0 and info.get("failed", 0) > 0])
+
+        failed_datasets = len([ds for ds, info in
+                              {ds: info for item in all_results.get("failed_datasets", [])
+                               for ds, info in [(item["dataset"], item["result"])]}.items()
+                              if info.get("downloaded", 0) == 0 and info.get("failed", 0) > 0])
+
+        final_metrics = {
+            "summary/total_files_downloaded": all_results['total_files_downloaded'],
+            "summary/total_files_failed": all_results['total_files_failed'],
+            "summary/total_files_skipped": all_results['total_files_skipped'],
+            "summary/total_files_attempted": total_attempted,
+            "summary/overall_success_rate": overall_success_rate,
+            "summary/duration_seconds": all_results['duration_seconds'],
+            "summary/duration_minutes": all_results['duration_seconds'] / 60,
+            "summary/fully_downloaded_datasets": fully_downloaded,
+            "summary/partially_downloaded_datasets": partially_downloaded,
+            "summary/failed_datasets": failed_datasets,
+            "summary/skipped_special_access": len(all_results['skipped_special_access']),
+            "summary/timestamp": datetime.now().isoformat(),
+            # New comprehensive statistics
+            "summary/total_bytes_downloaded": all_results['total_bytes_downloaded'],
+            "summary/total_bytes_extracted": all_results['total_bytes_extracted'],
+            "summary/total_extracted_files": all_results['total_extracted_files'],
+            "summary/total_directory_size": all_results['total_directory_size'],
+            "summary/total_files_in_directories": all_results['total_files_in_directories'],
+            "summary/total_images": all_results['total_images'],
+            "summary/total_extraction_attempts": all_results['total_extraction_attempts'],
+            "summary/total_extraction_successes": all_results['total_extraction_successes'],
+            "summary/total_extraction_failures": all_results['total_extraction_failures'],
+            "summary/image_download_attempts": all_results['total_image_download_attempts'],
+            "summary/image_download_successes": all_results['total_image_download_successes'],
+            "summary/image_download_failures": all_results['total_image_download_failures'],
         }
 
         log_to_wandb(wandb_run, final_metrics)
@@ -1501,6 +1696,15 @@ def print_final_summary(results: Dict):
     print(f"  Successfully Extracted Files:   {results.get('total_extracted_files', 0)}")
 
     print("")
+    print("=" * 80)
+    print("IMAGE DOWNLOAD SUMMARY")
+    print("=" * 80)
+    print(f"  Image Requests:                {results.get('total_image_download_attempts', 0)}")
+    print(f"  Successful Images:             {results.get('total_image_download_successes', 0)}")
+    print(f"  Failed Images (dead links):    {results.get('total_image_download_failures', 0)}")
+
+    print("")
+    duration = results.get('duration_seconds', 0)
     print("=" * 80)
     print("DATA SIZE & EXTRACTION STATISTICS")
     print("=" * 80)
@@ -1590,20 +1794,12 @@ def print_final_summary(results: Dict):
                     if image_count > 0:
                         print(f"    - Images Found:   {image_count}")
 
-                # Show specific failures
-                if failed > 0:
-                    print(f"  Failed URLs:")
-                    for url_info in details.get("urls", []):
-                        if url_info["status"] == "failed":
-                            print(f"    ✗ {url_info['filename']}")
-                            print(f"      Error: {url_info['error']}")
-
-                # Show specific downloads
-                if downloaded > 0:
-                    print(f"  Successfully Downloaded:")
-                    for url_info in details.get("urls", []):
-                        if url_info["status"] == "downloaded":
-                            print(f"    ✓ {url_info['filename']}")
+                img_stats = details.get("image_downloads", {})
+                if img_stats.get("attempts", 0) > 0:
+                    print(f"  Image Download Stats:")
+                    print(f"    - Attempts:   {img_stats['attempts']}")
+                    print(f"    - Successes:  {img_stats['successes']}")
+                    print(f"    - Failures:   {img_stats['failures']}")
         else:
             print(f"  Status: ⊘ NOT ATTEMPTED")
             print(f"  Output: {config['output_dir']}")
@@ -1859,6 +2055,7 @@ def print_comprehensive_stats(data_root: str = "data"):
                 "type": config.get("type", "unknown"),
                 "img2dataset_stats": img2dataset_stats,
                 "extraction_status": extraction_status,
+                "image_downloads": result.get("image_downloads") if 'image_downloads' in result else None,
             })
         else:
             total_datasets_missing += 1
@@ -2182,6 +2379,10 @@ def main():
                 "total_extraction_attempts": 0,
                 "total_extraction_successes": 0,
                 "total_extraction_failures": 0,
+                "total_image_download_attempts": 0,
+                "total_image_download_successes": 0,
+                "total_image_download_failures": 0,
+                "image_download_details": [],
             }
 
             for dataset_name in args.datasets:
@@ -2208,9 +2409,11 @@ def main():
                 results["total_directory_size"] += result.get("total_directory_size", 0)
                 results["total_files_in_directories"] += result.get("total_files_in_directory", 0)
                 results["total_images"] += result.get("image_count", 0)
-                results["total_extraction_attempts"] += result.get("extraction_attempts", 0)
-                results["total_extraction_successes"] += result.get("extraction_successes", 0)
-                results["total_extraction_failures"] += result.get("extraction_failures", 0)
+                img_stats = result.get("image_downloads", {})
+                results["total_image_download_attempts"] += img_stats.get("attempts", 0)
+                results["total_image_download_successes"] += img_stats.get("successes", 0)
+                results["total_image_download_failures"] += img_stats.get("failures", 0)
+                results["image_download_details"].extend(img_stats.get("details", []))
 
                 if result.get("failed", 0) == 0:
                     results["downloaded_datasets"].append(dataset_name)
@@ -2247,6 +2450,9 @@ def main():
                     "summary/total_extraction_attempts": results['total_extraction_attempts'],
                     "summary/total_extraction_successes": results['total_extraction_successes'],
                     "summary/total_extraction_failures": results['total_extraction_failures'],
+                    "summary/image_download_attempts": results['total_image_download_attempts'],
+                    "summary/image_download_successes": results['total_image_download_successes'],
+                    "summary/image_download_failures": results['total_image_download_failures'],
                 })
 
             print_final_summary(results)
