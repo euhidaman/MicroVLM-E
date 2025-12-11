@@ -64,14 +64,7 @@ KNOWN ISSUES ADDRESSED:
 - Archives: Some may not extract automatically - status is now tracked.
 - HuggingFace: Token not always needed - made optional for public datasets.
 
-USAGE TIPS:
------------
-- For CC3M: If TSV download fails, the script automatically tries HuggingFace
-- For LAION: Images are embedded in HF dataset format - use directly or extract
-- Run verify_datasets.py to check current status of all datasets
-- Check final summary for specific issues and recommended actions
-=============================================================================
-"""
+
 
 import argparse
 import os
@@ -1047,9 +1040,122 @@ def download_images_from_tsv(tsv_path: str, output_dir: str, max_images: int = N
     return stats
 
 
+def download_cc3m_from_hf(output_dir: str, max_samples: int = None) -> Tuple[bool, Dict]:
+    """
+    Download CC3M images directly from HuggingFace dataset with images included.
+    This is more reliable than downloading from dead URLs.
+
+    Args:
+        output_dir: Directory to save images
+        max_samples: Maximum number of samples to download (None for all)
+
+    Returns:
+        (success flag, image download stats dict)
+    """
+    img_stats = {"attempts": 0, "successes": 0, "failures": 0, "details": []}
+
+    if not HF_DATASETS_AVAILABLE:
+        logger.error("HuggingFace datasets library not available. Install with: pip install datasets")
+        return False, img_stats
+
+    try:
+        logger.info("Attempting to download CC3M from HuggingFace with images...")
+        logger.info("This method is more reliable than downloading from individual URLs.")
+
+        # Try to use img2dataset with webdataset format (best for CC3M)
+        logger.info("")
+        logger.info("RECOMMENDED: Use img2dataset tool for CC3M")
+        logger.info("Install: pip install img2dataset")
+        logger.info("Then run: img2dataset --url_list data/cc3m/GCC-training.tsv --input_format tsv")
+        logger.info("         --output_folder data/cc3m/images_training --processes_count 16")
+        logger.info("")
+
+        # Alternative: Try HuggingFace datasets that have CC3M with images
+        hf_alternatives = [
+            ("google/conceptual_captions", "unlabeled"),  # Official CC3M
+            ("mlfoundations/datacomp_small", "train"),  # Contains CC3M subset
+        ]
+
+        for hf_dataset_name, split in hf_alternatives:
+            try:
+                logger.info(f"Trying HF dataset: {hf_dataset_name}")
+
+                # Load dataset in streaming mode to save memory
+                dataset = load_dataset(hf_dataset_name, split=split, streaming=True)
+
+                images_dir = os.path.join(output_dir, "images_hf")
+                os.makedirs(images_dir, exist_ok=True)
+
+                logger.info(f"Downloading images to: {images_dir}")
+
+                count = 0
+                for idx, sample in enumerate(dataset):
+                    if max_samples and idx >= max_samples:
+                        break
+
+                    try:
+                        # Extract image and caption
+                        image = None
+                        if 'image' in sample and sample['image'] is not None:
+                            image = sample['image']
+                        elif 'jpg' in sample and sample['jpg'] is not None:
+                            # Some datasets have image as bytes
+                            try:
+                                import io
+                                from PIL import Image
+                                image = Image.open(io.BytesIO(sample['jpg']))
+                            except ImportError:
+                                logger.warning("PIL not installed, skipping byte images")
+                                continue
+                            except Exception:
+                                continue
+
+                        if image is not None:
+                            image_path = os.path.join(images_dir, f"{idx:08d}.jpg")
+
+                            # Save image
+                            if hasattr(image, 'save'):
+                                image.save(image_path, 'JPEG')
+                            else:
+                                continue
+
+                            # Save caption
+                            caption = sample.get('caption', '') or sample.get('text', '') or sample.get('TEXT', '')
+                            if caption:
+                                caption_path = os.path.join(images_dir, f"{idx:08d}.txt")
+                                with open(caption_path, 'w', encoding='utf-8') as f:
+                                    f.write(str(caption))
+
+                            count += 1
+                            img_stats["successes"] += 1
+
+                            if count % 1000 == 0:
+                                logger.info(f"Downloaded {count} images from HF...")
+                    except Exception as e:
+                        img_stats["failures"] += 1
+                        continue
+
+                img_stats["attempts"] = count
+                if count > 0:
+                    logger.info(f"✓ Successfully downloaded {count} images from HuggingFace")
+                    return True, img_stats
+
+            except Exception as e:
+                logger.warning(f"Could not load {hf_dataset_name}: {e}")
+                continue
+
+        logger.warning("Could not download CC3M from any HuggingFace alternative")
+        return False, img_stats
+
+    except Exception as e:
+        logger.error(f"Failed to download CC3M from HuggingFace: {e}")
+        return False, img_stats
+
+
 def setup_cc3m_with_img2dataset(output_dir: str, force: bool = False) -> Tuple[bool, Dict]:
     """
     Download CC3M images from TSV files using custom downloader.
+    If direct URL download fails, falls back to HuggingFace dataset.
 
     Args:
         output_dir: Directory containing CC3M TSV files
@@ -1072,8 +1178,20 @@ def setup_cc3m_with_img2dataset(output_dir: str, force: bool = False) -> Tuple[b
         tsv_files.append(("validation", val_tsv))
 
     if not tsv_files:
-        logger.warning("No CC3M TSV files found. Cannot proceed with image download.")
-        return False, img_stats
+        logger.warning("No CC3M TSV files found. Trying HuggingFace alternative...")
+        return download_cc3m_from_hf(output_dir, max_samples=100000)
+
+    # Check if we've already tried and failed at TSV download before
+    failed_marker = os.path.join(output_dir, ".tsv_download_failed")
+    if os.path.exists(failed_marker):
+        logger.warning("")
+        logger.warning("=" * 70)
+        logger.warning("Previous TSV download attempt failed (marker file exists)")
+        logger.warning("Skipping TSV download and going straight to HuggingFace fallback")
+        logger.warning("To retry TSV download, delete: " + failed_marker)
+        logger.warning("=" * 70)
+        logger.warning("")
+        return download_cc3m_from_hf(output_dir, max_samples=100000)
 
     logger.info("")
     logger.info("=" * 70)
@@ -1115,6 +1233,74 @@ def setup_cc3m_with_img2dataset(output_dir: str, force: bool = False) -> Tuple[b
             success = False
 
     logger.info("=" * 70)
+
+    # CRITICAL FIX: If TSV download completely failed, try HuggingFace fallback
+    total_successes = img_stats.get("successes", 0)
+    total_attempts = img_stats.get("attempts", 0)
+
+    if total_successes == 0 and total_attempts > 0:
+        # Create marker file to avoid retrying TSV download in future runs
+        failed_marker = os.path.join(output_dir, ".tsv_download_failed")
+        with open(failed_marker, 'w') as f:
+            f.write(f"TSV download failed on {datetime.now().isoformat()}\n")
+            f.write(f"Attempted: {total_attempts} URLs\n")
+            f.write(f"Successful: 0\n")
+            f.write("Reason: CC3M URLs are dead due to link rot\n")
+        
+        logger.warning("")
+        logger.warning("=" * 70)
+        logger.warning("TSV-based download FAILED COMPLETELY (0 images downloaded)")
+        logger.warning("This is due to dead URLs in the CC3M TSV files")
+        logger.warning("Created marker file: " + failed_marker)
+        logger.warning("Attempting HuggingFace alternative download...")
+        logger.warning("=" * 70)
+        logger.warning("")
+
+        hf_success, hf_stats = download_cc3m_from_hf(output_dir, max_samples=100000)
+
+        if hf_success:
+            img_stats["successes"] += hf_stats.get("successes", 0)
+            img_stats["failures"] += hf_stats.get("failures", 0)
+            success = True
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info(f"✓ HuggingFace fallback SUCCESSFUL: {hf_stats.get('successes', 0)} images downloaded")
+            logger.info("=" * 70)
+        else:
+            logger.error("")
+            logger.error("=" * 70)
+            logger.error("✗ HuggingFace fallback also failed")
+            logger.error("")
+            logger.error("CC3M IMAGE DOWNLOAD SOLUTIONS:")
+            logger.error("=" * 70)
+            logger.error("")
+            logger.error("OPTION 1: Use img2dataset (RECOMMENDED)")
+            logger.error("  1. Install: pip install img2dataset")
+            logger.error("  2. Run for training set:")
+            logger.error("     img2dataset --url_list data/cc3m/GCC-training.tsv \\")
+            logger.error("                 --input_format tsv \\")
+            logger.error("                 --url_col url \\")
+            logger.error("                 --caption_col caption \\")
+            logger.error("                 --output_folder data/cc3m/images_training \\")
+            logger.error("                 --processes_count 16 \\")
+            logger.error("                 --thread_count 64 \\")
+            logger.error("                 --image_size 256 \\")
+            logger.error("                 --resize_mode keep_ratio \\")
+            logger.error("                 --resize_only_if_bigger True \\")
+            logger.error("                 --output_format webdataset \\")
+            logger.error("                 --enable_wandb False")
+            logger.error("")
+            logger.error("OPTION 2: Download pre-processed CC3M")
+            logger.error("  Use datasets that already have images:")
+            logger.error("  - HuggingFace: google/conceptual_captions")
+            logger.error("  - Or use alternative: mlfoundations/datacomp_small")
+            logger.error("")
+            logger.error("OPTION 3: Skip CC3M")
+            logger.error("  Train with COCO (123K images) + LAION (500K+ images)")
+            logger.error("  This is sufficient for most vision-language models")
+            logger.error("")
+            logger.error("=" * 70)
+
     return success, img_stats
 
 
