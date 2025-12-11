@@ -1324,8 +1324,8 @@ def setup_laion_with_img2dataset(output_dir: str, force: bool = False) -> Tuple[
                 logger.info(f"✓ Extracted {count} images from HuggingFace dataset")
                 return True, img_stats
 
-        except Exception as e:
-            logger.warning(f"Failed to extract images from HF dataset: {e}")
+            except Exception as e:
+                logger.warning(f"Failed to extract images from HF dataset: {e}")
 
     # Check for parquet files as fallback
     parquet_files = []
